@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode user and derived data
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Local build and packaging output
+build/
+dist/
+*.app/
+*.dSYM/
+
+# Project-local temporary files
+.tmp/
+tmp/
+*.tmp
+*.temp
+*.log
+
+# Editor swap and backup files
+*.swp
+*.swo
+*~
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Reference manuals are not runtime dependencies and should not be uploaded
+Sources/*.pdf
