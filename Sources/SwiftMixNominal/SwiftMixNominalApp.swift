@@ -4,6 +4,8 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var shouldTerminate: (() -> Bool)?
 
+    private var settingsWindow: NSWindow?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
     }
@@ -15,6 +17,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         shouldTerminate?() == false ? .terminateCancel : .terminateNow
     }
+
+    @MainActor
+    func showSettings(model: AppModel) {
+        model.start()
+
+        let window: NSWindow
+        if let settingsWindow {
+            window = settingsWindow
+        } else {
+            let newWindow = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 700, height: 820),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            newWindow.title = "SwiftMix Nominal Lock Settings"
+            newWindow.contentViewController = NSHostingController(
+                rootView: SettingsView(model: model)
+            )
+            newWindow.contentMinSize = NSSize(width: 640, height: 700)
+            newWindow.isReleasedWhenClosed = false
+            newWindow.center()
+            settingsWindow = newWindow
+            window = newWindow
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
 }
 
 @main
@@ -24,7 +55,7 @@ struct SwiftMixNominalApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarContent(model: model)
+            MenuBarContent(model: model, openSettings: showSettings)
                 .onAppear {
                     configureLifecycleSafety()
                     model.start()
@@ -36,14 +67,11 @@ struct SwiftMixNominalApp: App {
                 .accessibilityLabel(model.statusLine)
         }
         .menuBarExtraStyle(.menu)
+    }
 
-        Settings {
-            SettingsView(model: model)
-                .onAppear {
-                    configureLifecycleSafety()
-                    model.start()
-                }
-        }
+    private func showSettings() {
+        configureLifecycleSafety()
+        appDelegate.showSettings(model: model)
     }
 
     private func configureLifecycleSafety() {

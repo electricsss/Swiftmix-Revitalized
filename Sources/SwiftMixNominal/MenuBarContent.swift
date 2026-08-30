@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MenuBarContent: View {
     @ObservedObject var model: AppModel
+    let openSettings: () -> Void
 
     var body: some View {
         Text(model.statusLine)
@@ -85,11 +86,6 @@ struct MenuBarContent: View {
         if !state.sourceConnected || !state.destinationConnected {
             return "endpoint unavailable"
         }
-        return "waiting for HUI reply"
-    }
-
-    private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        return "waiting for HUI activity"
     }
 }

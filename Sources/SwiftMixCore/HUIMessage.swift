@@ -16,7 +16,9 @@ public enum HUIEncodingError: Error, Equatable {
 public enum HUI {
     public static let minimumFaderValue = 0
     public static let maximumFaderValue = 16_383
-    public static let defaultNominalValue = 13_168
+
+    /// Observed at the printed 0 dB mark on one fader in each SwiftMix bank.
+    public static let defaultNominalValue = 12_320
 
     /// HUI host-to-surface keepalive. Send this regularly to every bank.
     public static let pingRequest = MIDIMessage([0x90, 0x00, 0x00])
@@ -42,4 +44,5 @@ public enum HUI {
             MIDIMessage([0xB0, 0x20 | localFader, low])
         ]
     }
+
 }

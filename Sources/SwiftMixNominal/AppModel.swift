@@ -16,7 +16,7 @@ struct BankRuntimeState: Identifiable {
     var sourceConnected = false
     var destinationConnected = false
     var online = false
-    var lastReplyUptime: TimeInterval?
+    var lastActivityUptime: TimeInterval?
     var connectionGeneration: UInt = 0
 
     var id: Int { bank }
@@ -42,6 +42,10 @@ private struct OutboundFaderCommand {
 final class AppModel: ObservableObject {
     @Published private(set) var sources: [MIDIEndpointInfo] = []
     @Published private(set) var destinations: [MIDIEndpointInfo] = []
+    @Published private(set) var ethernetServices: [EthernetNetworkService]
+    @Published private(set) var selectedEthernetServiceID: String?
+    @Published private(set) var selectedEthernetServiceName: String?
+    @Published private(set) var selectedEthernetBSDName: String?
     @Published private(set) var routes: [BankRoute]
     @Published private(set) var runtimeStates: [BankRuntimeState]
     @Published private(set) var lastObservedFader: ObservedFader?
@@ -71,12 +75,16 @@ final class AppModel: ObservableObject {
         static let lockEnabled = "nominalLockEnabled"
         static let nominalVerified = "nominalVerified"
         static let automaticTransmissionAuthorized = "automaticHUITransmissionAuthorized"
+        static let selectedEthernetServiceID = "selectedEthernetNetworkServiceID"
+        static let selectedEthernetServiceName = "selectedEthernetNetworkServiceName"
+        static let selectedEthernetBSDName = "selectedEthernetBSDInterfaceName"
         static let dawMIDIChannel = "dawTakeoverMIDIChannel"
         static let dawControllerBase = "dawTakeoverControllerBase"
     }
 
     private let defaults: UserDefaults
     private let midi: CoreMIDIService
+    private let ethernetMonitor: EthernetNetworkServiceMonitor
     private var streamParsers = Array(repeating: MIDIMessageStreamParser(), count: 4)
     private var huiParsers = Array(repeating: HUIFaderParser(), count: 4)
     private var keepaliveTask: Task<Void, Never>?
@@ -85,12 +93,31 @@ final class AppModel: ObservableObject {
     private var recentFaderCommands: [Int: OutboundFaderCommand] = [:]
     private var vegasNextChannel = 0
     private var vegasStartedUptime: TimeInterval?
+    // Dynamic-store callbacks request immediate full refreshes. While traffic is
+    // active, full service identity is also refreshed every 800 ms, and focused
+    // live-link checks are performed before sends at most 100 ms apart.
+    private static let keepaliveIntervalNanoseconds: UInt64 = 800_000_000
+    private static let huiActivityTimeout: TimeInterval = 2.5
+    private static let candidateTestActivityTimeout: TimeInterval = 15
+    private static let directEthernetValidationInterval: TimeInterval = 0.1
+
     private var lastReassertionUptime = -Double.infinity
+    private var lastDirectEthernetValidationUptime = -Double.infinity
     private var refreshWorkItem: DispatchWorkItem?
     private var hasStarted = false
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+
+        let ethernetMonitor = EthernetNetworkServiceMonitor()
+        let initialEthernetServices = ethernetMonitor.services()
+        let savedEthernetServiceID = defaults.string(forKey: DefaultsKey.selectedEthernetServiceID)
+        let savedEthernetBSDName = defaults.string(forKey: DefaultsKey.selectedEthernetBSDName)
+        self.ethernetMonitor = ethernetMonitor
+        ethernetServices = initialEthernetServices
+        selectedEthernetServiceID = savedEthernetServiceID
+        selectedEthernetServiceName = defaults.string(forKey: DefaultsKey.selectedEthernetServiceName)
+        selectedEthernetBSDName = savedEthernetBSDName
 
         let savedChannelCount = defaults.integer(forKey: DefaultsKey.channelCount)
         channelCount = [8, 16, 24, 32].contains(savedChannelCount) ? savedChannelCount : 32
@@ -133,7 +160,16 @@ final class AppModel: ObservableObject {
             forKey: DefaultsKey.automaticTransmissionAuthorized
         )
         automaticTransmissionAuthorized = savedAutomaticTransmissionAuthorization
+        let selectedService = savedEthernetServiceID.flatMap { selectedID in
+            initialEthernetServices.first(where: { $0.id == selectedID })
+        }
+        let selectedServiceIdentityMatches = savedEthernetBSDName.map { savedBSDName in
+            selectedService?.bsdName == savedBSDName
+        } == true
+        let selectedServiceCanOpenTransmission = selectedServiceIdentityMatches
+            && selectedService?.isActive == true
         transmissionEnabled = savedAutomaticTransmissionAuthorization
+            && selectedServiceCanOpenTransmission
         dawMIDIChannel = defaults.object(forKey: DefaultsKey.dawMIDIChannel) == nil
             ? 1
             : min(max(defaults.integer(forKey: DefaultsKey.dawMIDIChannel), 1), 16)
@@ -149,6 +185,16 @@ final class AppModel: ObservableObject {
             lastIssue = setupError
         } else if let dawSetupError = midi.dawSetupError {
             lastIssue = dawSetupError
+        } else if savedAutomaticTransmissionAuthorization, !selectedServiceCanOpenTransmission {
+            if let savedEthernetBSDName,
+               let currentBSDName = selectedService?.bsdName,
+               currentBSDName != savedEthernetBSDName {
+                lastIssue = "Saved automatic transmission authorization was not used because the selected service ID now resolves to \(currentBSDName), not the authorized \(savedEthernetBSDName). This session remains monitor only."
+            } else if savedEthernetBSDName == nil, selectedService != nil {
+                lastIssue = "Saved automatic transmission authorization was not used because this installation has no persisted BSD identity for the selected service. The current identity must be recorded before transmission can be enabled."
+            } else {
+                lastIssue = "Saved automatic transmission authorization was not used because the exact selected Ethernet service and BSD interface are unavailable or inactive. This session remains monitor only until you explicitly enable transmission."
+            }
         }
 
         midi.onBytes = { [weak self] event in
@@ -159,6 +205,12 @@ final class AppModel: ObservableObject {
         midi.onTopologyChanged = { [weak self] in
             self?.handleTopologyChanged()
         }
+        ethernetMonitor.onChange = { [weak self] in
+            Task { @MainActor in
+                self?.handleEthernetConfigurationChanged()
+            }
+        }
+        ethernetMonitor.startMonitoring()
     }
 
     deinit {
@@ -170,6 +222,60 @@ final class AppModel: ObservableObject {
 
     var activeBankCount: Int {
         channelCount / 8
+    }
+
+    var selectedEthernetService: EthernetNetworkService? {
+        guard let selectedEthernetServiceID else { return nil }
+        return ethernetServices.first { $0.id == selectedEthernetServiceID }
+    }
+
+    var selectedEthernetServiceStatusLine: String {
+        if let service = selectedEthernetService {
+            let activity = service.isActive ? "active" : "inactive"
+            let addresses = service.ipv4Addresses.isEmpty
+                ? "no IPv4 address"
+                : "IPv4: \(service.ipv4Addresses.joined(separator: ", "))"
+            let identity = selectedEthernetBSDName.map { savedBSDName in
+                savedBSDName == service.bsdName
+                    ? ""
+                    : " · authorized BSD was \(savedBSDName)"
+            } ?? " · BSD identity not yet recorded"
+            return "\(service.displayName) · \(service.bsdName)\(identity) · \(activity) · \(addresses)"
+        }
+
+        if selectedEthernetServiceID != nil {
+            let savedName = selectedEthernetServiceName ?? "Saved Ethernet service"
+            let savedBSD = selectedEthernetBSDName.map { " · \($0)" } ?? ""
+            return "\(savedName)\(savedBSD) · unavailable (the saved service ID was not found)"
+        }
+
+        return "Select an Ethernet service"
+    }
+
+    var canEnableHUITransmission: Bool {
+        huiTransmissionBlockerText == nil
+    }
+
+    var huiTransmissionBlockerText: String? {
+        guard selectedEthernetServiceID != nil else {
+            return "Select an Ethernet service before enabling HUI transmission."
+        }
+        guard let service = selectedEthernetService else {
+            return "The exact selected Ethernet service is unavailable. Rescan or explicitly choose a service; the app will not substitute another interface."
+        }
+        guard let selectedEthernetBSDName else {
+            return "The selected service has no recorded BSD interface identity. Rescan to record it; automatic transmission remains blocked during this migration."
+        }
+        guard service.bsdName == selectedEthernetBSDName else {
+            return "The selected service ID now resolves to \(service.bsdName), not the authorized \(selectedEthernetBSDName). Transmission authorization has been revoked."
+        }
+        guard service.isActive else {
+            return "The selected Ethernet service '\(service.displayName)' (\(service.bsdName)) is inactive. Connect and enable it, then rescan."
+        }
+        if let setupError = midi.setupError {
+            return setupError
+        }
+        return nil
     }
 
     var isCommissioningActive: Bool {
@@ -199,7 +305,7 @@ final class AppModel: ObservableObject {
     }
 
     /// The icon is bright only when normal nominal lock control is verified and
-    /// every active bank is exchanging HUI keepalives. Test modes remain dim.
+    /// every active bank has sent recent valid HUI traffic. Test modes remain dim.
     var menuBarIconIsActive: Bool {
         lockIsArmed
             && runtimeStates.prefix(activeBankCount).count == activeBankCount
@@ -207,6 +313,10 @@ final class AppModel: ObservableObject {
     }
 
     var statusLine: String {
+        if let ethernetBlocker = huiTransmissionBlockerText {
+            return "Ethernet safety interlock: \(ethernetBlocker)"
+        }
+
         switch commissioningPhase {
         case let .testing(channel, target):
             return "Commissioning channel \(channel + 1)/32: \(targetDescription(target))"
@@ -239,7 +349,7 @@ final class AppModel: ObservableObject {
             return "Waiting for ipMIDI endpoints for bank \(missing.bank + 1)"
         }
         if let offline = activeStates.first(where: { !$0.online }) {
-            return "Lock armed; waiting for HUI reply from bank \(offline.bank + 1)"
+            return "Lock armed; waiting for HUI activity from bank \(offline.bank + 1)"
         }
         if !activeRoutesAreDistinct {
             return "Each bank must use a distinct MIDI input and output"
@@ -271,12 +381,33 @@ final class AppModel: ObservableObject {
     }
 
     var canTestFirstFader: Bool {
-        transmissionEnabled
-            && !isCommissioningActive
-            && !dawTakeoverEnabled
-            && !localEchoDetected
-            && runtimeStates.first?.destinationConnected == true
-            && runtimeStates.first?.online == true
+        testCandidateBlockReason == nil
+    }
+
+    var testCandidateBlockReason: String? {
+        if isCommissioningActive {
+            return "Stop the commissioning routine first."
+        }
+        if dawTakeoverEnabled {
+            return "Exit DAW Takeover first."
+        }
+        if !transmissionEnabled {
+            return "Enable HUI transmission for this session first."
+        }
+        if localEchoDetected {
+            return "Fix the detected MIDI loopback and rescan."
+        }
+        guard let bank = runtimeStates.first,
+              bank.sourceConnected,
+              bank.destinationConnected else {
+            return "Bank 1 requires both MIDI input and output endpoints."
+        }
+        guard let lastActivity = bank.lastActivityUptime,
+              ProcessInfo.processInfo.systemUptime - lastActivity
+                < Self.candidateTestActivityTimeout else {
+            return "Move or touch a fader in Bank 1 (channels 1–8), then start the test within 15 seconds."
+        }
+        return nil
     }
 
     var canVerifyNominal: Bool {
@@ -355,7 +486,7 @@ final class AppModel: ObservableObject {
             return "Bank \(missing.bank + 1) does not have both MIDI endpoints."
         }
         if let offline = runtimeStates.prefix(4).first(where: { !$0.online }) {
-            return "Bank \(offline.bank + 1) has not replied to HUI keepalive."
+            return "Bank \(offline.bank + 1) has not sent valid HUI activity recently."
         }
         if !activeRoutesAreDistinct {
             return "Banks 1–4 must use four distinct MIDI inputs and four distinct outputs."
@@ -384,10 +515,11 @@ final class AppModel: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
 
-        refreshEndpointsAndReconnect()
+        refreshEthernetServices(enforceSafetyInterlock: true)
+        refreshEndpointsAndReconnect(ethernetAlreadyValidated: true)
         keepaliveTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 800_000_000)
+                try? await Task.sleep(nanoseconds: Self.keepaliveIntervalNanoseconds)
                 guard !Task.isCancelled else { break }
                 self?.keepaliveTick()
             }
@@ -397,12 +529,18 @@ final class AppModel: ObservableObject {
     func enableHUITransmissionForSession() {
         guard !transmissionEnabled else { return }
 
+        guard refreshEthernetServices(enforceSafetyInterlock: false) else { return }
+        guard canEnableHUITransmission else {
+            lastIssue = huiTransmissionBlockerText
+            return
+        }
+
         localEchoDetected = false
         transmissionEnabled = true
         midi.setTransmissionEnabled(true)
         lastReassertionUptime = ProcessInfo.processInfo.systemUptime
         lastIssue = nil
-        refreshEndpointsAndReconnect()
+        refreshEndpointsAndReconnect(ethernetAlreadyValidated: true)
     }
 
     /// Closes the transport gate before cancelling any work. This intentionally
@@ -420,7 +558,7 @@ final class AppModel: ObservableObject {
 
         for bank in runtimeStates.indices {
             runtimeStates[bank].online = false
-            runtimeStates[bank].lastReplyUptime = nil
+            runtimeStates[bank].lastActivityUptime = nil
         }
 
         if interruptedTest || interruptedDAWTakeover {
@@ -456,7 +594,9 @@ final class AppModel: ObservableObject {
 
         midi.setDAWOutputEnabled(false)
         dawTakeoverEnabled = false
-        if restoreAllActiveFadersToNominal() {
+        let restoredNominal = restoreAllActiveFadersToNominal()
+        guard transmissionEnabled else { return }
+        if restoredNominal {
             lastIssue = "DAW Takeover ended and CoreMIDI accepted nominal commands for all 32 faders. Visually confirm the desk before reconnecting audio."
         } else {
             lastIssue = "DAW Takeover ended, but nominal restoration was incomplete. Keep audio disconnected and inspect the desk."
@@ -464,9 +604,16 @@ final class AppModel: ObservableObject {
     }
 
     func setAutomaticTransmissionAuthorized(_ enabled: Bool) {
-        if enabled, !commissioningPassedThisSession {
-            lastIssue = "Automatic HUI transmission can be enabled only after the full 32-channel exercise reaches Vegas mode in this session."
-            return
+        if enabled {
+            guard refreshEthernetServices(enforceSafetyInterlock: true) else { return }
+            guard commissioningPassedThisSession else {
+                lastIssue = "Automatic HUI transmission can be enabled only after the full 32-channel exercise reaches Vegas mode in this session."
+                return
+            }
+            guard canEnableHUITransmission else {
+                lastIssue = huiTransmissionBlockerText
+                return
+            }
         }
 
         automaticTransmissionAuthorized = enabled
@@ -552,8 +699,8 @@ final class AppModel: ObservableObject {
 
     /// Explicit calibration action. This can affect the analog level on channel 1.
     func testNominalOnFirstFader() {
-        guard canTestFirstFader else {
-            lastIssue = "Bank 1 must be online with transmission enabled and no MIDI loopback."
+        if let blockReason = testCandidateBlockReason {
+            lastIssue = blockReason
             return
         }
         if sendFader(bank: 0, fader: 0, value: nominalValue) {
@@ -625,11 +772,37 @@ final class AppModel: ObservableObject {
         commissioningCompletedChannels = 0
         vegasStartedUptime = nil
 
-        if restoreAllActiveFadersToNominal() {
+        let restoredNominal = restoreAllActiveFadersToNominal()
+        guard transmissionEnabled else { return }
+        if restoredNominal {
             lastIssue = "CoreMIDI accepted nominal restoration commands for all 32 faders. This does not prove physical movement; visually confirm every fader before reconnecting audio."
         } else {
             lastIssue = "The test stopped, but CoreMIDI did not accept every nominal restoration command. Keep audio disconnected and inspect the desk."
         }
+    }
+
+    func selectEthernetService(id: String?) {
+        guard !hasUnsafeActiveMode, id != selectedEthernetServiceID else { return }
+
+        let newService = id.flatMap { selectedID in
+            ethernetServices.first { $0.id == selectedID }
+        }
+        guard id == nil || newService != nil else {
+            lastIssue = "The requested Ethernet service is no longer available. Rescan and make an explicit selection."
+            return
+        }
+
+        revokeEthernetBoundAuthorizationWithoutRestoration()
+        selectedEthernetServiceID = newService?.id
+        selectedEthernetServiceName = newService?.displayName
+        selectedEthernetBSDName = newService?.bsdName
+        persistSelectedEthernetService()
+        lastIssue = "The Ethernet service selection changed. All outgoing MIDI was stopped without restoration, and commissioning/startup authorization was revoked. Verify and recommission this exact service before authorizing automatic transmission again."
+    }
+
+    func rescanEthernetServices() {
+        guard !hasUnsafeActiveMode else { return }
+        refreshEthernetServices(enforceSafetyInterlock: true)
     }
 
     func selectSource(bank: Int, uniqueID: MIDIUniqueID?) {
@@ -709,6 +882,197 @@ final class AppModel: ObservableObject {
         return destinations.first { $0.uniqueID == uniqueID }?.name
     }
 
+    private func handleEthernetConfigurationChanged() {
+        refreshEthernetServices(enforceSafetyInterlock: true)
+    }
+
+    /// Returns false when an identity migration/change was discovered or an
+    /// active transmission interlock was tripped. Callers enabling a session
+    /// must then require a new explicit action.
+    @discardableResult
+    private func refreshEthernetServices(enforceSafetyInterlock: Bool) -> Bool {
+        ethernetServices = ethernetMonitor.services()
+
+        guard let selectedEthernetServiceID else { return true }
+        guard let currentService = ethernetServices.first(where: {
+            $0.id == selectedEthernetServiceID
+        }) else {
+            if enforceSafetyInterlock, transmissionEnabled {
+                tripEthernetSafetyInterlock()
+                return false
+            }
+            return true
+        }
+
+        if let authorizedBSDName = selectedEthernetBSDName {
+            guard currentService.bsdName == authorizedBSDName else {
+                handleEthernetBSDIdentityChange(
+                    currentService: currentService,
+                    previousBSDName: authorizedBSDName
+                )
+                return false
+            }
+        } else {
+            recordMigratedEthernetBSDIdentity(currentService: currentService)
+            return false
+        }
+
+        if currentService.displayName != selectedEthernetServiceName {
+            selectedEthernetServiceName = currentService.displayName
+            persistSelectedEthernetService()
+        }
+
+        if currentService.isActive {
+            lastDirectEthernetValidationUptime = ProcessInfo.processInfo.systemUptime
+        }
+
+        guard enforceSafetyInterlock, transmissionEnabled else { return true }
+        guard currentService.isActive else {
+            tripEthernetSafetyInterlock()
+            return false
+        }
+        return true
+    }
+
+    private func enforceEthernetSafetyBeforeSend() -> Bool {
+        guard transmissionEnabled else { return false }
+        guard let selectedEthernetServiceID,
+              let authorizedBSDName = selectedEthernetBSDName,
+              let cachedService = ethernetServices.first(where: {
+                  $0.id == selectedEthernetServiceID
+              }) else {
+            tripEthernetSafetyInterlock()
+            return false
+        }
+
+        guard cachedService.bsdName == authorizedBSDName else {
+            handleEthernetBSDIdentityChange(
+                currentService: cachedService,
+                previousBSDName: authorizedBSDName
+            )
+            return false
+        }
+        guard cachedService.isActive else {
+            tripEthernetSafetyInterlock()
+            return false
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastDirectEthernetValidationUptime
+            >= Self.directEthernetValidationInterval {
+            lastDirectEthernetValidationUptime = now
+            guard ethernetMonitor.interfaceIsCurrentlyActive(bsdName: authorizedBSDName) else {
+                // Close first; refresh afterward only to improve displayed state
+                // or detect an identity change. No send follows this failure.
+                tripEthernetSafetyInterlock()
+                refreshEthernetServices(enforceSafetyInterlock: false)
+                return false
+            }
+        }
+        return transmissionEnabled
+    }
+
+    private func handleEthernetBSDIdentityChange(
+        currentService: EthernetNetworkService,
+        previousBSDName: String
+    ) {
+        let previousName = selectedEthernetServiceName ?? "Selected Ethernet service"
+
+        // Revoke and close before recording the newly observed identity.
+        revokeEthernetBoundAuthorizationWithoutRestoration()
+        selectedEthernetServiceName = currentService.displayName
+        selectedEthernetBSDName = currentService.bsdName
+        persistSelectedEthernetService()
+
+        lastIssue = "\(previousName) kept service ID \(currentService.id), but its underlying BSD interface changed from \(previousBSDName) to \(currentService.bsdName). The CoreMIDI gate was closed without restoration, active control was stopped, and commissioning/startup authorization was revoked before the new identity was recorded. Explicitly enable and recommission this identity before authorizing automatic transmission."
+    }
+
+    private func recordMigratedEthernetBSDIdentity(
+        currentService: EthernetNetworkService
+    ) {
+        let hadAuthorizationOrControl = transmissionEnabled
+            || commissioningPassedThisSession
+            || automaticTransmissionAuthorized
+            || hasUnsafeActiveMode
+        if hadAuthorizationOrControl {
+            revokeEthernetBoundAuthorizationWithoutRestoration()
+        }
+
+        selectedEthernetServiceName = currentService.displayName
+        selectedEthernetBSDName = currentService.bsdName
+        persistSelectedEthernetService()
+        lastDirectEthernetValidationUptime = -Double.infinity
+
+        if hadAuthorizationOrControl {
+            lastIssue = "Recorded \(currentService.bsdName) as the BSD identity for the selected Ethernet service. Existing commissioning/startup authorization was revoked and transmission remained closed because the previous authorization was not tied to a BSD interface. Explicitly enable and recommission before authorizing automatic transmission."
+        } else {
+            lastIssue = "Recorded \(currentService.bsdName) as the BSD identity for the selected Ethernet service. Transmission remains disabled; review the identity and explicitly enable it when safe."
+        }
+    }
+
+    private func tripEthernetSafetyInterlock() {
+        guard transmissionEnabled else { return }
+
+        let selectedDescription = selectedEthernetServiceName
+            ?? selectedEthernetService?.displayName
+            ?? "The selected Ethernet service"
+        let availability = selectedEthernetService == nil
+            ? "is no longer available"
+            : "became inactive"
+
+        // Close the CoreMIDI gate before cancelling producers or changing any
+        // UI state. No cleanup/restoration may traverse an unverified route.
+        midi.setTransmissionEnabled(false)
+        transmissionEnabled = false
+        dawTakeoverEnabled = false
+        cancelCommissioningWithoutRestoration()
+        recentFaderCommands.removeAll()
+        markAllRuntimeBanksOffline()
+        lastDirectEthernetValidationUptime = -Double.infinity
+
+        lastIssue = "\(selectedDescription) \(availability). The Ethernet safety interlock closed all CoreMIDI transmission before further keepalive, fader, or DAW output. Commissioning/DAW control stopped without restoration; inspect the desk. This session will not resume automatically—explicitly enable transmission again after the exact service is active."
+    }
+
+    private func revokeEthernetBoundAuthorizationWithoutRestoration() {
+        // Identity changes revoke authorization before new identity information
+        // is persisted and intentionally send no restoration through either route.
+        midi.setTransmissionEnabled(false)
+        transmissionEnabled = false
+        dawTakeoverEnabled = false
+        cancelCommissioningWithoutRestoration()
+        recentFaderCommands.removeAll()
+        markAllRuntimeBanksOffline()
+        lastDirectEthernetValidationUptime = -Double.infinity
+        commissioningPassedThisSession = false
+        automaticTransmissionAuthorized = false
+        defaults.set(false, forKey: DefaultsKey.automaticTransmissionAuthorized)
+    }
+
+    private func markAllRuntimeBanksOffline() {
+        for bank in runtimeStates.indices {
+            runtimeStates[bank].online = false
+            runtimeStates[bank].lastActivityUptime = nil
+        }
+    }
+
+    private func persistSelectedEthernetService() {
+        if let selectedEthernetServiceID {
+            defaults.set(selectedEthernetServiceID, forKey: DefaultsKey.selectedEthernetServiceID)
+        } else {
+            defaults.removeObject(forKey: DefaultsKey.selectedEthernetServiceID)
+        }
+        if let selectedEthernetServiceName {
+            defaults.set(selectedEthernetServiceName, forKey: DefaultsKey.selectedEthernetServiceName)
+        } else {
+            defaults.removeObject(forKey: DefaultsKey.selectedEthernetServiceName)
+        }
+        if let selectedEthernetBSDName {
+            defaults.set(selectedEthernetBSDName, forKey: DefaultsKey.selectedEthernetBSDName)
+        } else {
+            defaults.removeObject(forKey: DefaultsKey.selectedEthernetBSDName)
+        }
+    }
+
     private func handleTopologyChanged() {
         if isCommissioningActive {
             cancelCommissioningWithoutRestoration()
@@ -732,7 +1096,9 @@ final class AppModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
     }
 
-    private func refreshEndpointsAndReconnect() {
+    private func refreshEndpointsAndReconnect(
+        ethernetAlreadyValidated: Bool = false
+    ) {
         let snapshot = midi.endpointSnapshot()
         sources = snapshot.sources
         destinations = snapshot.destinations
@@ -744,7 +1110,7 @@ final class AppModel: ObservableObject {
                 runtimeStates[bank].sourceConnected = false
                 runtimeStates[bank].destinationConnected = false
                 runtimeStates[bank].online = false
-                runtimeStates[bank].lastReplyUptime = nil
+                runtimeStates[bank].lastActivityUptime = nil
                 runtimeStates[bank].connectionGeneration = connection.generation
                 continue
             }
@@ -781,7 +1147,7 @@ final class AppModel: ObservableObject {
             runtimeStates[bank].sourceConnected = connection.sourceConnected
             runtimeStates[bank].destinationConnected = connection.destinationConnected
             runtimeStates[bank].online = false
-            runtimeStates[bank].lastReplyUptime = nil
+            runtimeStates[bank].lastActivityUptime = nil
             runtimeStates[bank].connectionGeneration = connection.generation
             streamParsers[bank] = MIDIMessageStreamParser()
             huiParsers[bank] = HUIFaderParser()
@@ -794,7 +1160,12 @@ final class AppModel: ObservableObject {
 
         lastReassertionUptime = ProcessInfo.processInfo.systemUptime
         guard transmissionEnabled else { return }
+        if !ethernetAlreadyValidated {
+            guard refreshEthernetServices(enforceSafetyInterlock: true),
+                  transmissionEnabled else { return }
+        }
         for bank in 0..<activeBankCount where runtimeStates[bank].destinationConnected {
+            guard enforceEthernetSafetyBeforeSend() else { return }
             let status = midi.send(HUI.pingRequest.bytes, toBank: bank)
             if let status, status != noErr {
                 lastIssue = "Initial HUI keepalive failed for bank \(bank + 1) (OSStatus \(status))."
@@ -862,10 +1233,11 @@ final class AppModel: ObservableObject {
 
             let events = huiParsers[bank].consume(message)
             for huiEvent in events {
+                recordHUIActivity(bank: bank, receivedUptime: event.receivedUptime)
+
                 switch huiEvent {
                 case .pingReply:
-                    runtimeStates[bank].lastReplyUptime = event.receivedUptime
-                    runtimeStates[bank].online = true
+                    break
                 case let .faderPosition(fader, value):
                     lastObservedFader = ObservedFader(
                         bank: bank,
@@ -908,6 +1280,11 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func recordHUIActivity(bank: Int, receivedUptime: TimeInterval) {
+        runtimeStates[bank].lastActivityUptime = receivedUptime
+        runtimeStates[bank].online = true
     }
 
     private func processCommissioningReport(
@@ -961,6 +1338,7 @@ final class AppModel: ObservableObject {
             let channel = vegasNextChannel
             let value = wave.value(channel: channel, elapsed: now - vegasStartedUptime)
             if !sendGlobalFader(channel: channel, value: value) {
+                guard transmissionEnabled else { return }
                 abortCommissioning(
                     reason: "CoreMIDI rejected a Vegas-mode command for channel \(channel + 1).",
                     attemptNominalRestoration: true
@@ -978,6 +1356,7 @@ final class AppModel: ObservableObject {
         switch action {
         case let .send(channel, value):
             guard sendGlobalFader(channel: channel, value: value) else {
+                guard transmissionEnabled else { return }
                 abortCommissioning(
                     reason: "CoreMIDI rejected the exercise command for channel \(channel + 1).",
                     attemptNominalRestoration: true
@@ -1009,7 +1388,9 @@ final class AppModel: ObservableObject {
         vegasStartedUptime = nil
 
         if attemptNominalRestoration, transmissionEnabled, nominalVerified {
-            if restoreAllActiveFadersToNominal() {
+            let restoredNominal = restoreAllActiveFadersToNominal()
+            guard transmissionEnabled else { return }
+            if restoredNominal {
                 lastIssue = "\(reason) CoreMIDI accepted a nominal restoration for all 32 faders; visually verify the desk before reconnecting audio."
             } else {
                 lastIssue = "\(reason) Nominal restoration was incomplete; keep audio disconnected and inspect the desk."
@@ -1045,24 +1426,22 @@ final class AppModel: ObservableObject {
     private func keepaliveTick() {
         let now = ProcessInfo.processInfo.systemUptime
 
-        guard transmissionEnabled else {
-            for bank in 0..<activeBankCount {
-                runtimeStates[bank].online = false
-                runtimeStates[bank].lastReplyUptime = nil
-            }
-            return
-        }
+        if transmissionEnabled {
+            guard refreshEthernetServices(enforceSafetyInterlock: true),
+                  transmissionEnabled else { return }
 
-        for bank in 0..<activeBankCount {
-            if runtimeStates[bank].destinationConnected {
+            for bank in 0..<activeBankCount where runtimeStates[bank].destinationConnected {
+                guard enforceEthernetSafetyBeforeSend() else { return }
                 let status = midi.send(HUI.pingRequest.bytes, toBank: bank)
                 if let status, status != noErr {
                     lastIssue = "HUI keepalive failed for bank \(bank + 1) (OSStatus \(status))."
                 }
             }
+        }
 
-            if let lastReply = runtimeStates[bank].lastReplyUptime {
-                runtimeStates[bank].online = now - lastReply < 2.5
+        for bank in 0..<activeBankCount {
+            if let lastActivity = runtimeStates[bank].lastActivityUptime {
+                runtimeStates[bank].online = now - lastActivity < Self.huiActivityTimeout
             } else {
                 runtimeStates[bank].online = false
             }
@@ -1070,7 +1449,7 @@ final class AppModel: ObservableObject {
 
         if isCommissioningActive, !allActiveBanksOnline {
             abortCommissioning(
-                reason: "A HUI bank stopped replying during commissioning.",
+                reason: "A HUI bank stopped sending valid activity during commissioning.",
                 attemptNominalRestoration: true
             )
             return
@@ -1079,7 +1458,7 @@ final class AppModel: ObservableObject {
         if dawTakeoverEnabled, !allActiveBanksOnline {
             midi.setDAWOutputEnabled(false)
             dawTakeoverEnabled = false
-            lastIssue = "A HUI bank stopped replying, so DAW Takeover was stopped. No restoration was sent through the unverified connection; inspect the desk."
+            lastIssue = "A HUI bank stopped sending valid activity, so DAW Takeover was stopped. No restoration was sent through the unverified connection; inspect the desk."
             return
         }
 
@@ -1089,6 +1468,7 @@ final class AppModel: ObservableObject {
     }
 
     private func sendDAWPosition(channel: Int, value: Int) {
+        guard enforceEthernetSafetyBeforeSend() else { return }
         let mapping = DAWTakeoverMapping(
             midiChannel: dawMIDIChannel - 1,
             controllerBase: dawControllerBase
@@ -1102,6 +1482,7 @@ final class AppModel: ObservableObject {
     }
 
     private func sendDAWTouch(channel: Int, touched: Bool) {
+        guard enforceEthernetSafetyBeforeSend() else { return }
         let mapping = DAWTakeoverMapping(
             midiChannel: dawMIDIChannel - 1,
             controllerBase: dawControllerBase
@@ -1125,6 +1506,7 @@ final class AppModel: ObservableObject {
             }
             for fader in 0..<8 {
                 if !sendFader(bank: bank, fader: fader, value: nominalValue) {
+                    guard transmissionEnabled else { return false }
                     allMessagesSent = false
                 }
             }
@@ -1151,6 +1533,7 @@ final class AppModel: ObservableObject {
             lastIssue = "Outgoing MIDI is disabled."
             return false
         }
+        guard enforceEthernetSafetyBeforeSend() else { return false }
         guard runtimeStates.indices.contains(bank), runtimeStates[bank].destinationConnected else {
             lastIssue = "Bank \(bank + 1) has no connected MIDI destination."
             return false
@@ -1185,7 +1568,7 @@ final class AppModel: ObservableObject {
         dawTakeoverEnabled = false
         for bank in runtimeStates.indices {
             runtimeStates[bank].online = false
-            runtimeStates[bank].lastReplyUptime = nil
+            runtimeStates[bank].lastActivityUptime = nil
         }
         lastIssue = "The MIDI routing changed, so commissioning authorization was revoked and all outgoing MIDI was disabled. Re-test the new route before authorizing startup transmission."
     }

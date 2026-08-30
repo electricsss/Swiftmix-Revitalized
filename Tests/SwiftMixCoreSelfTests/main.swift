@@ -13,19 +13,23 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 
 expect(HUI.pingRequest.bytes == [0x90, 0x00, 0x00], "Ping request bytes")
 expect(HUI.pingReply.bytes == [0x90, 0x00, 0x7F], "Ping reply bytes")
+expect(HUI.defaultNominalValue == 12_320, "SwiftMix nominal default")
+
+let nominal = HUI.defaultNominalValue
 
 do {
-    let encoded = try HUI.faderPosition(fader: 3, value: 13_168)
+    let encoded = try HUI.faderPosition(fader: 3, value: nominal)
     expect(
         encoded == [
-            MIDIMessage([0xB0, 0x03, 0x66]),
-            MIDIMessage([0xB0, 0x23, 0x70])
+            MIDIMessage([0xB0, 0x03, 0x60]),
+            MIDIMessage([0xB0, 0x23, 0x20])
         ],
         "Nominal fader encoding"
     )
 } catch {
     failures.append("Nominal fader encoding unexpectedly threw: \(error)")
 }
+
 
 do {
     _ = try HUI.faderPosition(fader: 8, value: 0)
@@ -46,10 +50,10 @@ do {
 }
 
 var huiParser = HUIFaderParser()
-expect(huiParser.consume(MIDIMessage([0xB0, 0x03, 0x66])).isEmpty, "Fader MSB waits for LSB")
+expect(huiParser.consume(MIDIMessage([0xB0, 0x03, 0x60])).isEmpty, "Fader MSB waits for LSB")
 expect(
-    huiParser.consume(MIDIMessage([0xB0, 0x23, 0x70]))
-        == [.faderPosition(fader: 3, value: 13_168)],
+    huiParser.consume(MIDIMessage([0xB0, 0x23, 0x20]))
+        == [.faderPosition(fader: 3, value: nominal)],
     "Fader pair decoding"
 )
 expect(
@@ -67,25 +71,25 @@ expect(
 var streamParser = MIDIMessageStreamParser()
 expect(streamParser.consume([0xB0, 0x01]).isEmpty, "Split MIDI message waits for remaining data")
 expect(
-    streamParser.consume([0x66, 0x21, 0x70])
-        == [MIDIMessage([0xB0, 0x01, 0x66]), MIDIMessage([0xB0, 0x21, 0x70])],
+    streamParser.consume([0x60, 0x21, 0x20])
+        == [MIDIMessage([0xB0, 0x01, 0x60]), MIDIMessage([0xB0, 0x21, 0x20])],
     "Packet split and running-status decoding"
 )
 
-let policy = NominalLockPolicy(nominalValue: 13_168, tolerance: 32)
-expect(!policy.shouldRestore(observedValue: 13_136), "Lower tolerance boundary")
-expect(!policy.shouldRestore(observedValue: 13_200), "Upper tolerance boundary")
-expect(policy.shouldRestore(observedValue: 13_135), "Below lower tolerance boundary")
-expect(policy.shouldRestore(observedValue: 13_201), "Above upper tolerance boundary")
+let policy = NominalLockPolicy(nominalValue: nominal, tolerance: 32)
+expect(!policy.shouldRestore(observedValue: nominal - 32), "Lower tolerance boundary")
+expect(!policy.shouldRestore(observedValue: nominal + 32), "Upper tolerance boundary")
+expect(policy.shouldRestore(observedValue: nominal - 33), "Below lower tolerance boundary")
+expect(policy.shouldRestore(observedValue: nominal + 33), "Above upper tolerance boundary")
 expect(policy.restoreValue(observedValue: 10_000, lockIsArmed: false) == nil, "Disabled lock does not restore")
-expect(policy.restoreValue(observedValue: 10_000, lockIsArmed: true) == 13_168, "Armed lock restores nominal")
+expect(policy.restoreValue(observedValue: 10_000, lockIsArmed: true) == nominal, "Armed lock restores nominal")
 expect(NominalLockPolicy(nominalValue: -1, tolerance: -10).nominalValue == 0, "Minimum value clamp")
 expect(NominalLockPolicy(nominalValue: 20_000).nominalValue == 16_383, "Maximum value clamp")
 expect(NominalLockPolicy(tolerance: -10).tolerance == 0, "Tolerance clamp")
 
 var sequence = CommissioningSequence(
     channelCount: 2,
-    nominalValue: 13_168,
+    nominalValue: nominal,
     nominalTolerance: 32,
     stageTimeout: 8
 )
@@ -94,7 +98,7 @@ expect(
     "Commissioning starts channel 1 at maximum"
 )
 expect(
-    sequence.observe(channel: 0, value: 13_168, at: 10) == nil,
+    sequence.observe(channel: 0, value: nominal, at: 10) == nil,
     "Report received with the command cannot count as stage travel"
 )
 expect(
@@ -102,7 +106,7 @@ expect(
     "Immediate target report does not prove movement"
 )
 expect(
-    sequence.observe(channel: 0, value: 13_168, at: 10.1) == nil,
+    sequence.observe(channel: 0, value: nominal, at: 10.1) == nil,
     "Commissioning records travel before target"
 )
 expect(
@@ -113,17 +117,17 @@ expect(
 expect(sequence.observe(channel: 0, value: 16_000, at: 10.6) == nil, "Minimum stage travel")
 expect(
     sequence.observe(channel: 0, value: 32, at: 11)
-        == .send(channel: 0, value: 13_168),
+        == .send(channel: 0, value: nominal),
     "Minimum report advances the same channel to nominal"
 )
 expect(sequence.observe(channel: 0, value: 100, at: 11.1) == nil, "Nominal stage travel")
 expect(
-    sequence.observe(channel: 0, value: 13_168, at: 11.5)
+    sequence.observe(channel: 0, value: nominal, at: 11.5)
         == .send(channel: 1, value: HUI.maximumFaderValue),
     "Nominal report advances to the next channel"
 )
 expect(sequence.completedChannelCount == 1, "Completed channel count")
-expect(sequence.observe(channel: 1, value: 13_168, at: 11.6) == nil, "Channel 2 maximum travel")
+expect(sequence.observe(channel: 1, value: nominal, at: 11.6) == nil, "Channel 2 maximum travel")
 expect(
     sequence.observe(channel: 1, value: HUI.maximumFaderValue, at: 12)
         == .send(channel: 1, value: HUI.minimumFaderValue),
@@ -132,12 +136,12 @@ expect(
 expect(sequence.observe(channel: 1, value: 10_000, at: 12.1) == nil, "Channel 2 minimum travel")
 expect(
     sequence.observe(channel: 1, value: HUI.minimumFaderValue, at: 12.5)
-        == .send(channel: 1, value: 13_168),
+        == .send(channel: 1, value: nominal),
     "Channel 2 minimum"
 )
 expect(sequence.observe(channel: 1, value: 1_000, at: 12.6) == nil, "Channel 2 nominal travel")
 expect(
-    sequence.observe(channel: 1, value: 13_168, at: 13) == .enterVegas,
+    sequence.observe(channel: 1, value: nominal, at: 13) == .enterVegas,
     "All nominal reports enter Vegas mode"
 )
 expect(sequence.phase == .vegas, "Vegas phase")
@@ -145,12 +149,12 @@ expect(sequence.completedChannelCount == 2, "All channels completed")
 
 var timeoutSequence = CommissioningSequence(
     channelCount: 32,
-    nominalValue: 13_168,
+    nominalValue: nominal,
     nominalTolerance: 32,
     stageTimeout: 8
 )
 _ = timeoutSequence.start(at: 20)
-expect(timeoutSequence.observe(channel: 0, value: 13_168, at: 21) == nil, "Timeout stage travel")
+expect(timeoutSequence.observe(channel: 0, value: nominal, at: 21) == nil, "Timeout stage travel")
 expect(timeoutSequence.tick(at: 27.99) == nil, "Commissioning waits until timeout")
 expect(
     timeoutSequence.observe(channel: 0, value: HUI.maximumFaderValue, at: 28.01) == nil,

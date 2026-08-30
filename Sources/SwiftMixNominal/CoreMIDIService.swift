@@ -36,6 +36,8 @@ struct MIDIIngressEvent {
 }
 
 final class CoreMIDIService {
+    private static let physicalMessageSpacing: TimeInterval = 0.002
+
     var onBytes: ((MIDIIngressEvent) -> Void)?
     var onTopologyChanged: (() -> Void)?
 
@@ -210,24 +212,40 @@ final class CoreMIDIService {
         send([message], toBank: bank)
     }
 
-    /// Sends related MIDI messages as one packet and one `MIDISend` call. This
-    /// keeps a HUI fader's MSB and LSB together instead of allowing half a
-    /// position command to succeed on its own.
+    /// Sends each MIDI message through a separate, briefly spaced `MIDISend`
+    /// call. The legacy SwiftMix requires the HUI MSB and LSB as distinct
+    /// three-byte ipMIDI UDP datagrams; the driver otherwise coalesces adjacent
+    /// calls into one six-byte datagram that the surface ignores.
     @discardableResult
     func send(_ messages: [[UInt8]], toBank bank: Int) -> OSStatus? {
-        // Hold the gate through `MIDISend` so that once emergency disable
-        // returns, no send that passed an earlier check can still be queued.
+        // Hold the gate across the complete ordered sequence so that emergency
+        // disable cannot interleave with the MSB/LSB pair.
         transmissionLock.lock()
         defer { transmissionLock.unlock() }
 
-        let payload = messages.flatMap { $0 }
+        let payloads = messages.filter { !$0.isEmpty }
         guard transmissionEnabled,
               outputPort != 0,
               let destination = destinations[bank],
-              !payload.isEmpty else {
+              !payloads.isEmpty else {
             return nil
         }
 
+        for (index, payload) in payloads.enumerated() {
+            if index > 0 {
+                Thread.sleep(forTimeInterval: Self.physicalMessageSpacing)
+            }
+            let status = sendPhysicalPacket(payload, to: destination)
+            guard status == noErr else { return status }
+        }
+        return noErr
+    }
+
+    /// Called only while `transmissionLock` is held.
+    private func sendPhysicalPacket(
+        _ payload: [UInt8],
+        to destination: MIDIEndpointRef
+    ) -> OSStatus {
         let storageSize = max(MemoryLayout<MIDIPacketList>.size, 1_024)
         let storage = UnsafeMutableRawPointer.allocate(
             byteCount: storageSize,

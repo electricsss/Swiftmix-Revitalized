@@ -29,7 +29,7 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This command can immediately change the analog level, recording level, and monitor feeds on channel 1. Confirm that the studio is in a safe state first.")
+            Text("This command can immediately change the analog level, recording level, and monitor feeds on channel 1. Keep your hand off the fader cap while sending. The SwiftMix MODE switch requests automation-mode changes through its HUI host; do not treat mixed LED combinations as a verified READ state until host mode handling has been confirmed. Confirm that the studio is in a safe state first.")
         }
         .alert("Verify and arm Nominal Lock?", isPresented: $showVerificationConfirmation) {
             Button("Verified — Arm Lock", role: .destructive) {
@@ -90,6 +90,36 @@ struct SettingsView: View {
         GroupBox("SwiftMix Connection") {
             VStack(alignment: .leading, spacing: 12) {
                 Picker(
+                    "Ethernet service",
+                    selection: Binding<String?>(
+                        get: { model.selectedEthernetServiceID },
+                        set: { model.selectEthernetService(id: $0) }
+                    )
+                ) {
+                    Text("Select an Ethernet service").tag(Optional<String>.none)
+                    missingEthernetServiceSelection
+                    ForEach(model.ethernetServices) { service in
+                        Text(service.displayName).tag(Optional(service.id))
+                    }
+                }
+                .disabled(model.hasUnsafeActiveMode)
+
+                Text(model.selectedEthernetServiceStatusLine)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(model.canEnableHUITransmission ? .green : .orange)
+
+                Button("Rescan Interfaces") {
+                    model.rescanEthernetServices()
+                }
+                .disabled(model.hasUnsafeActiveMode)
+
+                Text("Important: SwiftMix Nominal Lock talks to the third-party ipMIDI CoreMIDI driver. This selector blocks control unless the chosen macOS Ethernet service is active, but it cannot bind packets to that interface or force which interface ipMIDI uses. Configure and verify ipMIDI itself and macOS routing before enabling transmission.")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.orange)
+
+                Divider()
+
+                Picker(
                     "Channels",
                     selection: Binding(
                         get: { model.channelCount },
@@ -123,6 +153,13 @@ struct SettingsView: View {
                         Button("Enable for This Session…") {
                             showTransmissionConfirmation = true
                         }
+                        .disabled(!model.canEnableHUITransmission)
+                    }
+
+                    if let reason = model.huiTransmissionBlockerText {
+                        Text("Transmission blocked: \(reason)")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
                     }
                 }
 
@@ -179,7 +216,7 @@ struct SettingsView: View {
                     Text("This nominal value has been marked as physically verified.")
                         .foregroundStyle(.green)
                 } else {
-                    Text("Not verified. The initial 13168 value comes from another calibrated HUI surface and may not be exact for SwiftMix.")
+                    Text("Not verified. The default 12320 value was observed at the printed 0 dB mark on one fader in each SwiftMix bank. Verify it on this desk before transmission.")
                         .foregroundStyle(.orange)
                 }
 
@@ -207,7 +244,13 @@ struct SettingsView: View {
                     .disabled(!model.canVerifyNominal)
                 }
 
-                Text("For capture calibration, disable Nominal Lock, place one physical fader exactly at its printed 0 dB mark, then use the last received value above. Re-enable the lock only after the studio signal path is safe.")
+                if let reason = model.testCandidateBlockReason {
+                    Text("Candidate test unavailable: \(reason)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("For capture calibration, disable Nominal Lock, place one physical fader exactly at its printed 0 dB mark, then use the last received value above. The SwiftMix MODE switch changes automation mode through its HUI host, and this app does not yet interpret mode-button requests or drive the mode LEDs. Re-enable the lock only after the studio signal path is safe.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -218,7 +261,7 @@ struct SettingsView: View {
     private var commissioningSection: some View {
         GroupBox("Full-Desk Commissioning Exercise") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Destructive test: every fader reaches maximum, minimum (−∞), and verified nominal in strict channel order. Raw position reports—not just successful MIDI sends—advance the sequence. The routine then enters continuous Vegas wave mode.")
+                Text("Destructive test: do not begin until automation-mode handling and one-fader motor actuation have been verified with this host. Every fader then reaches maximum, minimum (−∞), and verified nominal in strict channel order. Raw position reports—not just successful MIDI sends—advance the sequence. The routine then enters continuous Vegas wave mode.")
                     .foregroundStyle(.red)
 
                 Text(model.commissioningStatusLine)
@@ -337,11 +380,22 @@ struct SettingsView: View {
                 )
                 .disabled(!model.commissioningPassedThisSession && !model.automaticTransmissionAuthorized)
 
-                Text("Fresh installations start in monitor-only mode. Automatic transmission can be authorized only after this session’s complete 32-channel exercise reaches Vegas mode; the exercise itself never resumes automatically.")
+                Text("Fresh installations start in monitor-only mode. Automatic transmission is tied to the exact selected Ethernet service ID and underlying BSD interface and can be authorized only after this session’s complete 32-channel exercise reaches Vegas mode. At a future launch the gate opens only if that same service ID resolves to the authorized BSD interface and is active; the exercise and an interrupted session never resume automatically.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var missingEthernetServiceSelection: some View {
+        if let serviceID = model.selectedEthernetServiceID,
+           model.selectedEthernetService == nil {
+            let savedName = model.selectedEthernetServiceName ?? "Saved Ethernet service"
+            let savedBSD = model.selectedEthernetBSDName.map { " · \($0)" } ?? ""
+            Text("\(savedName)\(savedBSD) (unavailable)")
+                .tag(Optional(serviceID))
         }
     }
 }
