@@ -4,4 +4,4 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname -- "$SCRIPT_DIR")
 
-exec swift run --package-path "$PROJECT_DIR" SwiftMixCaptureReplay "$@"
+exec swift run --package-path "$PROJECT_DIR" SwiftMixSineWave "$@"

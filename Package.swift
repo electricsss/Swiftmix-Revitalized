@@ -11,7 +11,8 @@ let package = Package(
         .library(name: "SwiftMixCore", targets: ["SwiftMixCore"]),
         .executable(name: "SwiftMixNominal", targets: ["SwiftMixNominal"]),
         .executable(name: "SwiftMixFaderProbe", targets: ["SwiftMixFaderProbe"]),
-        .executable(name: "SwiftMixCaptureReplay", targets: ["SwiftMixCaptureReplay"])
+        .executable(name: "SwiftMixCaptureReplay", targets: ["SwiftMixCaptureReplay"]),
+        .executable(name: "SwiftMixSineWave", targets: ["SwiftMixSineWave"])
     ],
     targets: [
         .target(
@@ -40,6 +41,14 @@ let package = Package(
             name: "SwiftMixCaptureReplay",
             dependencies: ["SwiftMixCore"],
             path: "Sources/SwiftMixCaptureReplay",
+            linkerSettings: [
+                .linkedFramework("CoreMIDI")
+            ]
+        ),
+        .executableTarget(
+            name: "SwiftMixSineWave",
+            dependencies: ["SwiftMixCore"],
+            path: "Sources/SwiftMixSineWave",
             linkerSettings: [
                 .linkedFramework("CoreMIDI")
             ]
