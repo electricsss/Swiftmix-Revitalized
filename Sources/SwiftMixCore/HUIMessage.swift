@@ -11,6 +11,7 @@ public struct MIDIMessage: Equatable, Sendable {
 public enum HUIEncodingError: Error, Equatable {
     case invalidFader(Int)
     case invalidValue(Int)
+    case invalidBankSnapshotCount(Int)
 }
 
 public enum HUI {
@@ -25,6 +26,15 @@ public enum HUI {
 
     /// Expected surface-to-host response to `pingRequest`.
     public static let pingReply = MIDIMessage([0x90, 0x00, 0x7F])
+
+    /// Logic-compatible channel-strip state observed at the start of the
+    /// successful SwiftMix automation capture. Send once when a bank connects.
+    public static let bankInitialization: [MIDIMessage] = (0..<8).flatMap { zone in
+        [
+            MIDIMessage([0xB0, 0x0C, UInt8(zone)]),
+            MIDIMessage([0xB0, 0x2C, 0x07])
+        ]
+    }
 
     /// Encodes one bank-local fader position as the HUI MSB and LSB CC pair.
     public static func faderPosition(fader: Int, value: Int) throws -> [MIDIMessage] {
@@ -45,4 +55,14 @@ public enum HUI {
         ]
     }
 
+    /// Encodes all eight faders in one bank as the complete ordered HUI stream
+    /// used by Logic and accepted by the SwiftMix surface.
+    public static func bankSnapshot(values: [Int]) throws -> [MIDIMessage] {
+        guard values.count == 8 else {
+            throw HUIEncodingError.invalidBankSnapshotCount(values.count)
+        }
+        return try values.enumerated().flatMap { fader, value in
+            try faderPosition(fader: fader, value: value)
+        }
+    }
 }

@@ -29,8 +29,8 @@ private struct Options {
     var execute = false
     var expectedInterface: String?
     var authorization: String?
-    var duration: TimeInterval = 30
-    var amplitude = 3_000
+    var duration: TimeInterval = 60
+    var amplitude = 4_000
     var period: TimeInterval = 4
     var frameRate: Double = 30
 
@@ -339,7 +339,7 @@ private func printUsage() {
     List CoreMIDI endpoints; sends nothing:
       sh Scripts/sine-wave-faders-1-32.sh --list
 
-    Execute the default 30-second wave (raw 9320...15320, 4-second period, 30 Hz):
+    Execute the default 60-second wave (raw 8320...16320, 4-second period, 30 Hz):
       sh Scripts/sine-wave-faders-1-32.sh --execute \\
         --expected-interface en5 \\
         --authorization \(authorizationToken)

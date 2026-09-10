@@ -51,8 +51,16 @@ struct MenuBarContent: View {
 
         Divider()
 
-        ForEach(Array(model.runtimeStates.prefix(model.activeBankCount))) { state in
-            Text("Bank \(state.bank + 1): \(bankStatus(state))")
+        Text("Snapshot Quick Recall")
+        if model.scenes.isEmpty {
+            Text("No Saved Snapshots")
+        } else {
+            ForEach(model.scenes) { scene in
+                Button(model.activeSceneID == scene.id ? "✓ \(scene.name)" : scene.name) {
+                    model.recallScene(id: scene.id)
+                }
+                .disabled(!model.canManageScenes || model.sceneCaptureEnabled)
+            }
         }
 
         Divider()
@@ -79,13 +87,4 @@ struct MenuBarContent: View {
         .keyboardShortcut("q")
     }
 
-    private func bankStatus(_ state: BankRuntimeState) -> String {
-        if state.online {
-            return "online"
-        }
-        if !state.sourceConnected || !state.destinationConnected {
-            return "endpoint unavailable"
-        }
-        return "waiting for HUI activity"
-    }
 }

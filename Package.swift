@@ -9,19 +9,26 @@ let package = Package(
     ],
     products: [
         .library(name: "SwiftMixCore", targets: ["SwiftMixCore"]),
+        .library(name: "SwiftMixNativeUDP", targets: ["SwiftMixNativeUDP"]),
         .executable(name: "SwiftMixNominal", targets: ["SwiftMixNominal"]),
         .executable(name: "SwiftMixFaderProbe", targets: ["SwiftMixFaderProbe"]),
         .executable(name: "SwiftMixCaptureReplay", targets: ["SwiftMixCaptureReplay"]),
-        .executable(name: "SwiftMixSineWave", targets: ["SwiftMixSineWave"])
+        .executable(name: "SwiftMixSineWave", targets: ["SwiftMixSineWave"]),
+        .executable(name: "SwiftMixNativeSineWave", targets: ["SwiftMixNativeSineWave"])
     ],
     targets: [
         .target(
             name: "SwiftMixCore",
             path: "Sources/SwiftMixCore"
         ),
+        .target(
+            name: "SwiftMixNativeUDP",
+            dependencies: ["SwiftMixCore"],
+            path: "Sources/SwiftMixNativeUDP"
+        ),
         .executableTarget(
             name: "SwiftMixNominal",
-            dependencies: ["SwiftMixCore"],
+            dependencies: ["SwiftMixCore", "SwiftMixNativeUDP"],
             path: "Sources/SwiftMixNominal",
             linkerSettings: [
                 .linkedFramework("CoreMIDI"),
@@ -54,8 +61,13 @@ let package = Package(
             ]
         ),
         .executableTarget(
+            name: "SwiftMixNativeSineWave",
+            dependencies: ["SwiftMixCore", "SwiftMixNativeUDP"],
+            path: "Sources/SwiftMixNativeSineWave"
+        ),
+        .executableTarget(
             name: "SwiftMixCoreSelfTests",
-            dependencies: ["SwiftMixCore"],
+            dependencies: ["SwiftMixCore", "SwiftMixNativeUDP"],
             path: "Tests/SwiftMixCoreSelfTests"
         )
     ],

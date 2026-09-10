@@ -1,4 +1,5 @@
 import CoreMIDI
+import SwiftMixCore
 import SwiftUI
 
 struct SettingsView: View {
@@ -8,6 +9,7 @@ struct SettingsView: View {
     @State private var showTransmissionConfirmation = false
     @State private var showCommissioningConfirmation = false
     @State private var showDAWTakeoverConfirmation = false
+    @State private var sceneName = ""
 
     var body: some View {
         ScrollView {
@@ -16,6 +18,7 @@ struct SettingsView: View {
                 safetySection
                 connectionSection
                 calibrationSection
+                scenesSection
                 commissioningSection
                 dawTakeoverSection
                 startupSection
@@ -53,15 +56,17 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This drives channel 1 through 32 one at a time: maximum, minimum (−∞), then verified nominal, waiting for position reports at every step. After all 32 report nominal, Vegas mode runs continuously across the desk until you stop it. Confirm that all console inputs, outputs, Pro Tools paths, speakers, headphones, and in-ear feeds are muted or physically disconnected.")
+            Text("This moves all 32 faders together: maximum, low raw 300, then verified nominal. Each position is held for three seconds. The test finishes at nominal and requires your visual confirmation; it does not rely on motor-position reports. Confirm that all console inputs, outputs, DAW paths, speakers, headphones, and in-ear feeds are muted or physically disconnected.")
         }
         .alert("Enable DAW Takeover?", isPresented: $showDAWTakeoverConfirmation) {
-            Button("Enable Generic MIDI Takeover", role: .destructive) {
+            Button("Enable Selected DAW Mode", role: .destructive) {
                 model.enableDAWTakeover()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Nominal Lock will be suspended while takeover is active. Moving a physical fader to write DAW automation also changes the console’s real analog level. Keep audio paths safe until this behavior is intentional and verified. This first takeover stage sends controller data to the DAW but does not accept DAW playback commands back to the console.")
+            Text(model.dawTakeoverProfile == .logicProHUI
+                ? "This creates temporary bidirectional HUI port pairs only for the selected bank or banks and bridges them to native Ethernet. The ports are disposed when Takeover stops. Remove old ipMIDI HUI assignments and keep audio paths safe during the first test."
+                : "Nominal Lock will be suspended while takeover is active. Moving a physical fader changes the console’s real analog level. This generic MIDI mode sends controller data to the DAW but does not accept playback commands back to the console.")
         }
     }
 
@@ -113,7 +118,7 @@ struct SettingsView: View {
                 }
                 .disabled(model.hasUnsafeActiveMode)
 
-                Text("Important: SwiftMix Nominal Lock talks to the third-party ipMIDI CoreMIDI driver. This selector blocks control unless the chosen macOS Ethernet service is active, but it cannot bind packets to that interface or force which interface ipMIDI uses. Configure and verify ipMIDI itself and macOS routing before enabling transmission.")
+                Text("SwiftMix Nominal Lock provides four native Ethernet MIDI ports. Their UDP sockets are bound directly to the selected BSD interface, so SwiftMix traffic does not follow the system multicast route onto Wi-Fi. Third-party ipMIDI is no longer required for physical fader control.")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(.orange)
 
@@ -132,7 +137,7 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Text("The app must be the sole HUI host on these ipMIDI ports. Remove the same SwiftMix HUI peripheral mappings from Pro Tools or the two hosts can fight over fader positions.")
+                Text("The app must be the sole HUI host for the SwiftMix. Quit Logic/Pro Tools control-surface sessions and disable the third-party ipMIDI driver for these four banks, or multiple hosts can fight over fader positions.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
@@ -168,8 +173,8 @@ struct SettingsView: View {
                 }
 
                 HStack {
-                    Button("Auto-Configure ipMIDI Ports") {
-                        model.autoConfigureIPMIDIPorts()
+                    Button("Use Native Ethernet Ports") {
+                        model.autoConfigureEthernetPorts()
                     }
                     Button("Rescan") {
                         model.rescanEndpoints()
@@ -258,10 +263,71 @@ struct SettingsView: View {
         }
     }
 
+    private var scenesSection: some View {
+        GroupBox("Fader Scenes") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Capture stores 32 target positions. Recall sends the scene immediately and locks each fader to its stored position; touch a fader to move it temporarily, then release it to return to the scene.")
+                    .foregroundStyle(.secondary)
+
+                if model.sceneCaptureEnabled {
+                    Text("Capture unlocked — move the desired faders now.")
+                        .font(.headline)
+                        .foregroundStyle(.orange)
+                    HStack {
+                        TextField("Scene name", text: $sceneName)
+                        Button("Save Scene") {
+                            model.saveCapturedScene(name: sceneName)
+                            if !model.sceneCaptureEnabled { sceneName = "" }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(sceneName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Cancel") {
+                            model.cancelSceneCapture()
+                            sceneName = ""
+                        }
+                    }
+                } else {
+                    Button("Unlock Faders & Capture New Scene") {
+                        sceneName = ""
+                        model.beginSceneCapture()
+                    }
+                    .disabled(!model.canManageScenes)
+                }
+
+                if model.scenes.isEmpty {
+                    Text("No scenes saved.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.scenes) { scene in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(scene.name)
+                                    .font(.headline)
+                                Text(model.activeSceneID == scene.id ? "Active scene lock" : "32 stored positions")
+                                    .font(.caption)
+                                    .foregroundStyle(model.activeSceneID == scene.id ? .green : .secondary)
+                            }
+                            Spacer()
+                            Button("Recall & Lock") {
+                                model.recallScene(id: scene.id)
+                            }
+                            .disabled(!model.canManageScenes || model.sceneCaptureEnabled)
+                            Button("Delete", role: .destructive) {
+                                model.deleteScene(id: scene.id)
+                            }
+                            .disabled(model.sceneCaptureEnabled)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private var commissioningSection: some View {
         GroupBox("Full-Desk Commissioning Exercise") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Destructive test: do not begin until automation-mode handling and one-fader motor actuation have been verified with this host. Every fader then reaches maximum, minimum (−∞), and verified nominal in strict channel order. Raw position reports—not just successful MIDI sends—advance the sequence. The routine then enters continuous Vegas wave mode.")
+                Text("Destructive test: all 32 faders move together to maximum, then low raw 300, then verified nominal. Each stage is held for three seconds. Transport acceptance and bank connectivity are checked, but you must visually verify physical movement.")
                     .foregroundStyle(.red)
 
                 Text(model.commissioningStatusLine)
@@ -301,9 +367,13 @@ struct SettingsView: View {
     }
 
     private var dawTakeoverSection: some View {
-        GroupBox("DAW Takeover · Generic MIDI") {
+        GroupBox("DAW Takeover") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Choose “SwiftMix DAW Takeover” as a MIDI input in the DAW. Faders 1–32 publish adjacent 7-bit CC messages; touch states publish notes 36–67. Use the DAW’s MIDI Learn or controller-mapping feature to write automation.")
+                if model.dawTakeoverProfile == .logicProHUI {
+                    Text("When enabled, temporary bidirectional HUI port pairs appear only for the selected bank or banks. Configure one Logic HUI device per active bank: Logic input = ‘Bank N Output’; Logic output = ‘Bank N Input’. The bridge forwards raw HUI between Logic and native Ethernet without ipMIDI.")
+                } else {
+                    Text("Choose “SwiftMix DAW Takeover” as a MIDI input in the DAW. Faders 1–32 publish adjacent 7-bit CC messages; touch states publish notes 36–67. Use MIDI Learn or controller mapping.")
+                }
 
                 Picker(
                     "MIDI channel",
@@ -340,11 +410,42 @@ struct SettingsView: View {
                         }
                     }
                 } else {
-                    Button("Enable DAW Takeover…") {
-                        showDAWTakeoverConfirmation = true
+                    HStack {
+                        Button("Enable DAW Takeover…") {
+                            showDAWTakeoverConfirmation = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canEnableDAWTakeover)
+
+                        Picker(
+                            "DAW",
+                            selection: Binding(
+                                get: { model.dawTakeoverProfile },
+                                set: { model.setDAWTakeoverProfile($0) }
+                            )
+                        ) {
+                            ForEach(DAWTakeoverProfile.allCases) { profile in
+                                Text(profile.displayName).tag(profile)
+                            }
+                        }
+                        .frame(maxWidth: 240)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canEnableDAWTakeover)
+
+                    Text(model.dawTakeoverProfile.detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+
+                    Picker(
+                        "Active fader banks",
+                        selection: Binding(
+                            get: { model.dawBankSelection },
+                            set: { model.setDAWBankSelection($0) }
+                        )
+                    ) {
+                        ForEach(DAWBankSelection.allCases) { selection in
+                            Text(selection.displayName).tag(selection)
+                        }
+                    }
 
                     if let reason = model.dawTakeoverBlockReason {
                         Text("Not ready: \(reason)")
@@ -352,7 +453,9 @@ struct SettingsView: View {
                     }
                 }
 
-                Text("Current scope: generic one-way MIDI automation output. Native Pro Tools mixer control requires a bidirectional HUI proxy; do not map Pro Tools directly to the four physical ipMIDI ports while this app is the SwiftMix host.")
+                Text(model.dawTakeoverProfile == .logicProHUI
+                    ? "Logic HUI ports exist only while this preset’s Takeover mode is active. Stopping Takeover closes the selected virtual endpoint pairs and returns only the selected bank or banks to nominal."
+                    : "Generic and Ableton profiles are one-way MIDI automation output. Select Logic Pro (HUI Bridge) for bidirectional HUI and motor automation without ipMIDI.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -380,7 +483,7 @@ struct SettingsView: View {
                 )
                 .disabled(!model.commissioningPassedThisSession && !model.automaticTransmissionAuthorized)
 
-                Text("Fresh installations start in monitor-only mode. Automatic transmission is tied to the exact selected Ethernet service ID and underlying BSD interface and can be authorized only after this session’s complete 32-channel exercise reaches Vegas mode. At a future launch the gate opens only if that same service ID resolves to the authorized BSD interface and is active; the exercise and an interrupted session never resume automatically.")
+                Text("Fresh installations start in monitor-only mode. Automatic transmission is tied to the exact selected Ethernet service ID and underlying BSD interface and can be authorized only after this session’s full-desk maximum, low, and nominal exercise completes. At a future launch the gate opens only if that same service ID resolves to the authorized BSD interface and is active; the exercise never resumes automatically.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -416,7 +519,7 @@ private struct BankEndpointSettings: View {
                     set: { model.selectSource(bank: bank, uniqueID: $0) }
                 )
             ) {
-                Text("Automatic ipMIDI Port \(bank + 1)").tag(Optional<MIDIUniqueID>.none)
+                Text("Automatic SwiftMix Ethernet Port \(bank + 1)").tag(Optional<MIDIUniqueID>.none)
                 missingSourceSelection
                 ForEach(model.sources) { endpoint in
                     Text(endpoint.name).tag(Optional(endpoint.uniqueID))
@@ -430,7 +533,7 @@ private struct BankEndpointSettings: View {
                     set: { model.selectDestination(bank: bank, uniqueID: $0) }
                 )
             ) {
-                Text("Automatic ipMIDI Port \(bank + 1)").tag(Optional<MIDIUniqueID>.none)
+                Text("Automatic SwiftMix Ethernet Port \(bank + 1)").tag(Optional<MIDIUniqueID>.none)
                 missingDestinationSelection
                 ForEach(model.destinations) { endpoint in
                     Text(endpoint.name).tag(Optional(endpoint.uniqueID))

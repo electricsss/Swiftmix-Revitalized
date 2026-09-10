@@ -74,7 +74,8 @@ public struct CommissioningSequence: Sendable {
     public mutating func observe(
         channel: Int,
         value: Int,
-        at time: TimeInterval
+        at time: TimeInterval,
+        trustedDirectTargetReport: Bool = false
     ) -> CommissioningSequenceAction? {
         guard case let .testing(expectedChannel, target) = phase,
               channel == expectedChannel,
@@ -95,7 +96,7 @@ public struct CommissioningSequence: Sendable {
 
         // A command echoed directly into the selected source reports the target
         // without any intervening travel. Do not treat that as motor movement.
-        guard sawPostCommandMovement else {
+        guard sawPostCommandMovement || trustedDirectTargetReport else {
             return nil
         }
 

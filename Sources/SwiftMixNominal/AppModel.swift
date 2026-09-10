@@ -22,6 +22,13 @@ struct BankRuntimeState: Identifiable {
     var id: Int { bank }
 }
 
+struct StoredFaderScene: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    let positions: [Int]
+    let createdAt: Date
+}
+
 struct ObservedFader: Equatable {
     let bank: Int
     let fader: Int
@@ -49,6 +56,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var routes: [BankRoute]
     @Published private(set) var runtimeStates: [BankRuntimeState]
     @Published private(set) var lastObservedFader: ObservedFader?
+    @Published private(set) var scenes: [StoredFaderScene]
+    @Published private(set) var activeSceneID: UUID?
+    @Published private(set) var sceneCaptureEnabled = false
 
     @Published private(set) var channelCount: Int
     @Published private(set) var nominalValue: Int
@@ -61,6 +71,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var dawTakeoverEnabled = false
     @Published private(set) var dawMIDIChannel: Int
     @Published private(set) var dawControllerBase: Int
+    @Published private(set) var dawTakeoverProfile: DAWTakeoverProfile
+    @Published private(set) var dawBankSelection: DAWBankSelection
     @Published private(set) var localEchoDetected = false
     @Published private(set) var commissioningPhase: CommissioningSequencePhase = .idle
     @Published private(set) var commissioningCompletedChannels = 0
@@ -80,6 +92,10 @@ final class AppModel: ObservableObject {
         static let selectedEthernetBSDName = "selectedEthernetBSDInterfaceName"
         static let dawMIDIChannel = "dawTakeoverMIDIChannel"
         static let dawControllerBase = "dawTakeoverControllerBase"
+        static let dawTakeoverProfile = "dawTakeoverProfile"
+        static let dawBankSelection = "dawBankSelection"
+        static let legacyLogicHUIBankSelection = "logicHUIBankSelection"
+        static let scenes = "storedFaderScenes"
     }
 
     private let defaults: UserDefaults
@@ -88,18 +104,35 @@ final class AppModel: ObservableObject {
     private var streamParsers = Array(repeating: MIDIMessageStreamParser(), count: 4)
     private var huiParsers = Array(repeating: HUIFaderParser(), count: 4)
     private var keepaliveTask: Task<Void, Never>?
+    private enum DeskExerciseStage {
+        case maximum
+        case low
+        case nominal
+    }
+
     private var commissioningTask: Task<Void, Never>?
     private var commissioningSequence: CommissioningSequence?
+    private var deskExerciseStage: DeskExerciseStage?
+    private var deskExerciseStageStartedUptime: TimeInterval?
     private var recentFaderCommands: [Int: OutboundFaderCommand] = [:]
+    private var touchedChannels = Set<Int>()
+    private var sceneCapturePositions: [Int]?
+    private var commandedBankValues = Array(
+        repeating: Array(repeating: HUI.defaultNominalValue, count: 8),
+        count: 4
+    )
     private var vegasNextChannel = 0
     private var vegasStartedUptime: TimeInterval?
     // Dynamic-store callbacks request immediate full refreshes. While traffic is
-    // active, full service identity is also refreshed every 800 ms, and focused
-    // live-link checks are performed before sends at most 100 ms apart.
-    private static let keepaliveIntervalNanoseconds: UInt64 = 800_000_000
+    // active, service identity and HUI keepalive are refreshed every 300 ms,
+    // matching the cadence observed in the successful Logic-compatible stream.
+    private static let keepaliveIntervalNanoseconds: UInt64 = 300_000_000
     private static let huiActivityTimeout: TimeInterval = 2.5
     private static let candidateTestActivityTimeout: TimeInterval = 15
     private static let directEthernetValidationInterval: TimeInterval = 0.1
+    private static let nominalReassertionInterval: TimeInterval = 5 * 60
+    private static let deskExerciseStageDuration: TimeInterval = 3
+    private static let deskExerciseLowValue = 300
 
     private var lastReassertionUptime = -Double.infinity
     private var lastDirectEthernetValidationUptime = -Double.infinity
@@ -137,11 +170,10 @@ final class AppModel: ObservableObject {
             tolerance = min(max(defaults.integer(forKey: DefaultsKey.tolerance), 0), 512)
         }
 
-        if defaults.object(forKey: DefaultsKey.lockEnabled) == nil {
-            nominalLockEnabled = true
-        } else {
-            nominalLockEnabled = defaults.bool(forKey: DefaultsKey.lockEnabled)
-        }
+        // Nominal Lock is deliberately session-only. Every launch starts
+        // inactive so no lock correction or nominal push occurs until the user
+        // explicitly chooses to enable it for the current session.
+        nominalLockEnabled = false
         nominalVerified = defaults.bool(forKey: DefaultsKey.nominalVerified)
 
         var savedRoutes: [BankRoute]
@@ -176,10 +208,32 @@ final class AppModel: ObservableObject {
         dawControllerBase = defaults.object(forKey: DefaultsKey.dawControllerBase) == nil
             ? 16
             : min(max(defaults.integer(forKey: DefaultsKey.dawControllerBase), 0), 96)
+        dawTakeoverProfile = defaults.string(forKey: DefaultsKey.dawTakeoverProfile)
+            .flatMap(DAWTakeoverProfile.init(rawValue:)) ?? .genericLinear
+        let savedDAWBankSelection = defaults.string(forKey: DefaultsKey.dawBankSelection)
+            ?? defaults.string(forKey: DefaultsKey.legacyLogicHUIBankSelection)
+        dawBankSelection = savedDAWBankSelection.flatMap(DAWBankSelection.init(rawValue:)) ?? .all
+        if let sceneData = defaults.data(forKey: DefaultsKey.scenes),
+           let decodedScenes = try? JSONDecoder().decode([StoredFaderScene].self, from: sceneData) {
+            scenes = decodedScenes.filter { scene in
+                scene.positions.count == 32
+                    && scene.positions.allSatisfy {
+                        (HUI.minimumFaderValue...HUI.maximumFaderValue).contains($0)
+                    }
+            }
+        } else {
+            scenes = []
+        }
+        activeSceneID = nil
         runtimeStates = (0..<4).map { BankRuntimeState(bank: $0) }
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
 
         midi = CoreMIDIService()
+        midi.configureNativeEthernet(interfaceBSDName: selectedService?.bsdName)
+        commandedBankValues = Array(
+            repeating: Array(repeating: nominalValue, count: 8),
+            count: 4
+        )
         midi.setTransmissionEnabled(transmissionEnabled)
         if let setupError = midi.setupError {
             lastIssue = setupError
@@ -292,7 +346,22 @@ final class AppModel: ObservableObject {
     }
 
     var hasUnsafeActiveMode: Bool {
-        isCommissioningActive || dawTakeoverEnabled
+        isCommissioningActive || dawTakeoverEnabled || sceneCaptureEnabled
+    }
+
+    var activeScene: StoredFaderScene? {
+        guard let activeSceneID else { return nil }
+        return scenes.first { $0.id == activeSceneID }
+    }
+
+    var canManageScenes: Bool {
+        transmissionEnabled
+            && !isCommissioningActive
+            && !dawTakeoverEnabled
+            && !localEchoDetected
+            && allActiveBanksOnline
+            && activeBankCount == 4
+            && nominalVerified
     }
 
     var lockIsArmed: Bool {
@@ -318,8 +387,8 @@ final class AppModel: ObservableObject {
         }
 
         switch commissioningPhase {
-        case let .testing(channel, target):
-            return "Commissioning channel \(channel + 1)/32: \(targetDescription(target))"
+        case let .testing(_, target):
+            return "Full-desk exercise: \(targetDescription(target))"
         case .vegas:
             return "Vegas mode active — use Stop to return all faders to nominal"
         case let .failed(failure):
@@ -328,8 +397,14 @@ final class AppModel: ObservableObject {
             break
         }
 
+        if sceneCaptureEnabled {
+            return "Scene capture unlocked — move faders, then name and save the scene"
+        }
         if dawTakeoverEnabled {
-            return "DAW Takeover active — CC \(dawControllerBase)–\(dawControllerBase + 31) on MIDI channel \(dawMIDIChannel)"
+            if dawTakeoverProfile == .logicProHUI {
+                return "Logic Pro HUI Bridge active: \(dawBankSelection.displayName)"
+            }
+            return "DAW Takeover active: \(dawBankSelection.displayName) — CC \(dawControllerBase)–\(dawControllerBase + 31) on MIDI channel \(dawMIDIChannel)"
         }
         if localEchoDetected {
             return "MIDI loopback detected — all outgoing MIDI was disabled"
@@ -346,7 +421,7 @@ final class AppModel: ObservableObject {
 
         let activeStates = runtimeStates.prefix(activeBankCount)
         if let missing = activeStates.first(where: { !$0.sourceConnected || !$0.destinationConnected }) {
-            return "Waiting for ipMIDI endpoints for bank \(missing.bank + 1)"
+            return "Waiting for SwiftMix Ethernet ports for bank \(missing.bank + 1)"
         }
         if let offline = activeStates.first(where: { !$0.online }) {
             return "Lock armed; waiting for HUI activity from bank \(offline.bank + 1)"
@@ -354,13 +429,16 @@ final class AppModel: ObservableObject {
         if !activeRoutesAreDistinct {
             return "Each bank must use a distinct MIDI input and output"
         }
+        if let activeScene {
+            return "Scene Lock active: \(activeScene.name)"
+        }
         return "Nominal Lock active on all \(channelCount) channels"
     }
 
     var commissioningStatusLine: String {
         switch commissioningPhase {
-        case let .testing(channel, target):
-            return "Channel \(channel + 1) of 32: waiting for \(targetDescription(target)) report. \(commissioningCompletedChannels) channels have returned to nominal."
+        case let .testing(_, target):
+            return "All 32 faders: \(targetDescription(target)). Watch the desk and keep hands clear."
         case .vegas:
             return "All 32 channels reported nominal. Vegas wave is running continuously, one channel command at a time."
         case let .failed(failure):
@@ -387,6 +465,9 @@ final class AppModel: ObservableObject {
     var testCandidateBlockReason: String? {
         if isCommissioningActive {
             return "Stop the commissioning routine first."
+        }
+        if sceneCaptureEnabled {
+            return "Save or cancel the scene capture first."
         }
         if dawTakeoverEnabled {
             return "Exit DAW Takeover first."
@@ -449,13 +530,17 @@ final class AppModel: ObservableObject {
         if !commissioningPassedThisSession && !automaticTransmissionAuthorized {
             return "Complete the 32-channel commissioning exercise first."
         }
-        if !allActiveBanksOnline {
-            return "All four HUI banks must be online."
+        if let unavailable = dawBankSelection.bankIndices.first(where: {
+            !runtimeStates[$0].sourceConnected
+                || !runtimeStates[$0].destinationConnected
+                || !runtimeStates[$0].online
+        }) {
+            return "Selected DAW Bank \(unavailable + 1) must be online."
         }
-        if !activeRoutesAreDistinct {
-            return "Banks 1–4 must use distinct MIDI inputs and outputs."
+        if !routesAreDistinct(banks: dawBankSelection.bankIndices) {
+            return "Selected DAW banks must use distinct MIDI inputs and outputs."
         }
-        if let dawSetupError = midi.dawSetupError {
+        if dawTakeoverProfile == .logicProHUI, let dawSetupError = midi.dawSetupError {
             return dawSetupError
         }
         return nil
@@ -467,6 +552,9 @@ final class AppModel: ObservableObject {
         }
         if dawTakeoverEnabled {
             return "Exit DAW Takeover before commissioning."
+        }
+        if sceneCaptureEnabled {
+            return "Save or cancel the scene capture before commissioning."
         }
         if channelCount != 32 {
             return "Set the channel count to 32 before running the full-desk test."
@@ -502,13 +590,17 @@ final class AppModel: ObservableObject {
     }
 
     private var activeRoutesAreDistinct: Bool {
-        let activeRoutes = Array(routes.prefix(activeBankCount))
+        routesAreDistinct(banks: Array(0..<activeBankCount))
+    }
+
+    private func routesAreDistinct(banks: [Int]) -> Bool {
+        let activeRoutes = banks.compactMap { routes.indices.contains($0) ? routes[$0] : nil }
         let sourceIDs = activeRoutes.compactMap(\.sourceUniqueID)
         let destinationIDs = activeRoutes.compactMap(\.destinationUniqueID)
-        return sourceIDs.count == activeBankCount
-            && destinationIDs.count == activeBankCount
-            && Set(sourceIDs).count == activeBankCount
-            && Set(destinationIDs).count == activeBankCount
+        return sourceIDs.count == banks.count
+            && destinationIDs.count == banks.count
+            && Set(sourceIDs).count == banks.count
+            && Set(destinationIDs).count == banks.count
     }
 
     func start() {
@@ -555,6 +647,8 @@ final class AppModel: ObservableObject {
         automaticTransmissionAuthorized = false
         defaults.set(false, forKey: DefaultsKey.automaticTransmissionAuthorized)
         cancelCommissioningWithoutRestoration()
+        sceneCaptureEnabled = false
+        sceneCapturePositions = nil
 
         for bank in runtimeStates.indices {
             runtimeStates[bank].online = false
@@ -572,6 +666,20 @@ final class AppModel: ObservableObject {
         defaults.set(dawMIDIChannel, forKey: DefaultsKey.dawMIDIChannel)
     }
 
+    func setDAWTakeoverProfile(_ profile: DAWTakeoverProfile) {
+        guard !dawTakeoverEnabled else { return }
+        midi.deactivateLogicHUIBridge()
+        dawTakeoverProfile = profile
+        defaults.set(profile.rawValue, forKey: DefaultsKey.dawTakeoverProfile)
+    }
+
+    func setDAWBankSelection(_ selection: DAWBankSelection) {
+        guard !dawTakeoverEnabled else { return }
+        midi.deactivateLogicHUIBridge()
+        dawBankSelection = selection
+        defaults.set(selection.rawValue, forKey: DefaultsKey.dawBankSelection)
+    }
+
     func setDAWControllerBase(_ value: Int) {
         guard !dawTakeoverEnabled else { return }
         dawControllerBase = min(max(value, 0), 96)
@@ -584,6 +692,11 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if dawTakeoverProfile == .logicProHUI,
+           !midi.activateLogicHUIBridge(banks: dawBankSelection.bankIndices) {
+            lastIssue = midi.dawSetupError ?? "Could not create the four Logic HUI bridge port pairs."
+            return
+        }
         midi.setDAWOutputEnabled(true)
         dawTakeoverEnabled = true
         lastIssue = nil
@@ -592,12 +705,14 @@ final class AppModel: ObservableObject {
     func stopDAWTakeoverAndRestoreNominal() {
         guard dawTakeoverEnabled else { return }
 
+        let banksToRestore = dawBankSelection.bankIndices
         midi.setDAWOutputEnabled(false)
         dawTakeoverEnabled = false
-        let restoredNominal = restoreAllActiveFadersToNominal()
+        let restoredNominal = restoreBanksToNominal(banksToRestore)
         guard transmissionEnabled else { return }
         if restoredNominal {
-            lastIssue = "DAW Takeover ended and CoreMIDI accepted nominal commands for all 32 faders. Visually confirm the desk before reconnecting audio."
+            let restoredChannels = banksToRestore.count * 8
+            lastIssue = "DAW Takeover ended and the active transport accepted nominal commands for \(restoredChannels) selected faders. Visually confirm the desk before reconnecting audio."
         } else {
             lastIssue = "DAW Takeover ended, but nominal restoration was incomplete. Keep audio disconnected and inspect the desk."
         }
@@ -607,7 +722,7 @@ final class AppModel: ObservableObject {
         if enabled {
             guard refreshEthernetServices(enforceSafetyInterlock: true) else { return }
             guard commissioningPassedThisSession else {
-                lastIssue = "Automatic HUI transmission can be enabled only after the full 32-channel exercise reaches Vegas mode in this session."
+                lastIssue = "Automatic HUI transmission can be enabled only after the full-desk maximum, low, and nominal exercise completes in this session."
                 return
             }
             guard canEnableHUITransmission else {
@@ -638,6 +753,10 @@ final class AppModel: ObservableObject {
         guard clamped != nominalValue else { return }
 
         nominalValue = clamped
+        commandedBankValues = Array(
+            repeating: Array(repeating: clamped, count: 8),
+            count: 4
+        )
         nominalVerified = false
         commissioningPassedThisSession = false
         defaults.set(clamped, forKey: DefaultsKey.nominalValue)
@@ -656,6 +775,79 @@ final class AppModel: ObservableObject {
         defaults.set(clamped, forKey: DefaultsKey.tolerance)
     }
 
+    func beginSceneCapture() {
+        guard canManageScenes else {
+            lastIssue = "All four native banks must be online with transmission enabled before capturing a scene."
+            return
+        }
+        nominalLockEnabled = false
+        defaults.set(false, forKey: DefaultsKey.lockEnabled)
+        activeSceneID = nil
+        sceneCapturePositions = commandedBankValues.flatMap { $0 }
+        sceneCaptureEnabled = true
+        lastIssue = "Scene capture is unlocked. Move the desired faders, enter a name, then save the scene."
+    }
+
+    func cancelSceneCapture() {
+        guard sceneCaptureEnabled else { return }
+        sceneCaptureEnabled = false
+        sceneCapturePositions = nil
+        lastIssue = nil
+    }
+
+    func saveCapturedScene(name: String) {
+        guard sceneCaptureEnabled, let positions = sceneCapturePositions else { return }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            lastIssue = "Enter a name before saving the scene."
+            return
+        }
+        let scene = StoredFaderScene(
+            id: UUID(),
+            name: trimmedName,
+            positions: positions,
+            createdAt: Date()
+        )
+        scenes.append(scene)
+        scenes.sort { $0.createdAt < $1.createdAt }
+        persistScenes()
+        sceneCaptureEnabled = false
+        sceneCapturePositions = nil
+        lastIssue = "Saved scene ‘\(scene.name)’. Faders remain unlocked until you recall a scene or enable Nominal Lock."
+    }
+
+    func recallScene(id: UUID) {
+        guard canManageScenes,
+              let scene = scenes.first(where: { $0.id == id }) else {
+            lastIssue = "The scene cannot be recalled until all four banks are online and idle."
+            return
+        }
+        sceneCaptureEnabled = false
+        sceneCapturePositions = nil
+        for bank in 0..<4 {
+            commandedBankValues[bank] = Array(scene.positions[(bank * 8)..<((bank + 1) * 8)])
+            guard sendBankSnapshot(bank: bank) else {
+                lastIssue = "Scene recall stopped because Bank \(bank + 1) rejected its snapshot. Keep audio isolated and inspect the desk."
+                return
+            }
+        }
+        activeSceneID = scene.id
+        nominalLockEnabled = true
+        defaults.set(true, forKey: DefaultsKey.lockEnabled)
+        lastReassertionUptime = ProcessInfo.processInfo.systemUptime
+        lastIssue = "Recalled and locked scene ‘\(scene.name)’."
+    }
+
+    func deleteScene(id: UUID) {
+        guard !isCommissioningActive, !dawTakeoverEnabled else { return }
+        scenes.removeAll { $0.id == id }
+        if activeSceneID == id {
+            activeSceneID = nil
+            nominalLockEnabled = false
+        }
+        persistScenes()
+    }
+
     func setNominalLockEnabled(_ enabled: Bool) {
         guard !hasUnsafeActiveMode else {
             lastIssue = "Nominal Lock cannot be changed while commissioning or DAW Takeover is active."
@@ -663,6 +855,11 @@ final class AppModel: ObservableObject {
         }
 
         nominalLockEnabled = enabled
+        if enabled {
+            activeSceneID = nil
+            sceneCaptureEnabled = false
+            sceneCapturePositions = nil
+        }
         defaults.set(enabled, forKey: DefaultsKey.lockEnabled)
 
         if canApplyNominal {
@@ -678,6 +875,7 @@ final class AppModel: ObservableObject {
 
         nominalVerified = true
         nominalLockEnabled = true
+        activeSceneID = nil
         defaults.set(true, forKey: DefaultsKey.nominalVerified)
         defaults.set(true, forKey: DefaultsKey.lockEnabled)
         applyNominalToAllFaders()
@@ -731,32 +929,36 @@ final class AppModel: ObservableObject {
             return
         }
 
-        var sequence = CommissioningSequence(
-            channelCount: 32,
-            nominalValue: nominalValue,
-            nominalTolerance: tolerance
-        )
-        let action = sequence.start(at: ProcessInfo.processInfo.systemUptime)
         streamParsers = Array(repeating: MIDIMessageStreamParser(), count: 4)
         huiParsers = Array(repeating: HUIFaderParser(), count: 4)
         recentFaderCommands.removeAll()
-        commissioningSequence = sequence
-        commissioningPhase = sequence.phase
+        touchedChannels.removeAll()
+        commissioningSequence = nil
         commissioningCompletedChannels = 0
         vegasNextChannel = 0
         vegasStartedUptime = nil
         lastIssue = nil
 
+        let now = ProcessInfo.processInfo.systemUptime
+        deskExerciseStage = .maximum
+        deskExerciseStageStartedUptime = now
+        commissioningPhase = .testing(channel: 0, target: .maximum)
+        guard sendAllFaders(value: HUI.maximumFaderValue) else {
+            abortCommissioning(
+                reason: "The active transport rejected the full-desk maximum command.",
+                attemptNominalRestoration: true
+            )
+            return
+        }
+
         commissioningTask?.cancel()
         commissioningTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 10_000_000)
+                try? await Task.sleep(nanoseconds: 20_000_000)
                 guard !Task.isCancelled else { break }
                 self?.commissioningTick()
             }
         }
-
-        handleCommissioningAction(action)
     }
 
     /// Normal stop: cancel the producer first, then attempt to return all 32
@@ -768,6 +970,8 @@ final class AppModel: ObservableObject {
         commissioningTask = nil
         commissioningSequence?.stop()
         commissioningSequence = nil
+        deskExerciseStage = nil
+        deskExerciseStageStartedUptime = nil
         commissioningPhase = .idle
         commissioningCompletedChannels = 0
         vegasStartedUptime = nil
@@ -775,7 +979,7 @@ final class AppModel: ObservableObject {
         let restoredNominal = restoreAllActiveFadersToNominal()
         guard transmissionEnabled else { return }
         if restoredNominal {
-            lastIssue = "CoreMIDI accepted nominal restoration commands for all 32 faders. This does not prove physical movement; visually confirm every fader before reconnecting audio."
+            lastIssue = "The active transport accepted nominal restoration commands for all 32 faders. This does not prove physical movement; visually confirm every fader before reconnecting audio."
         } else {
             lastIssue = "The test stopped, but CoreMIDI did not accept every nominal restoration command. Keep audio disconnected and inspect the desk."
         }
@@ -797,7 +1001,9 @@ final class AppModel: ObservableObject {
         selectedEthernetServiceName = newService?.displayName
         selectedEthernetBSDName = newService?.bsdName
         persistSelectedEthernetService()
-        lastIssue = "The Ethernet service selection changed. All outgoing MIDI was stopped without restoration, and commissioning/startup authorization was revoked. Verify and recommission this exact service before authorizing automatic transmission again."
+        midi.configureNativeEthernet(interfaceBSDName: newService?.bsdName)
+        refreshEndpointsAndReconnect(ethernetAlreadyValidated: true)
+        lastIssue = "The Ethernet service selection changed. Native SwiftMix Ethernet ports were rebound to the selected interface. Outgoing MIDI remains stopped until explicitly enabled and recommissioned."
     }
 
     func rescanEthernetServices() {
@@ -827,7 +1033,7 @@ final class AppModel: ObservableObject {
         refreshEndpointsAndReconnect()
     }
 
-    func autoConfigureIPMIDIPorts() {
+    func autoConfigureEthernetPorts() {
         guard !hasUnsafeActiveMode else { return }
         invalidateAuthorizationForRouteChange()
         routes = Array(repeating: BankRoute(), count: 4)
@@ -1049,6 +1255,9 @@ final class AppModel: ObservableObject {
     }
 
     private func markAllRuntimeBanksOffline() {
+        touchedChannels.removeAll()
+        sceneCaptureEnabled = false
+        sceneCapturePositions = nil
         for bank in runtimeStates.indices {
             runtimeStates[bank].online = false
             runtimeStates[bank].lastActivityUptime = nil
@@ -1099,7 +1308,9 @@ final class AppModel: ObservableObject {
     private func refreshEndpointsAndReconnect(
         ethernetAlreadyValidated: Bool = false
     ) {
+        midi.configureNativeEthernet(interfaceBSDName: selectedEthernetBSDName)
         let snapshot = midi.endpointSnapshot()
+        touchedChannels.removeAll()
         sources = snapshot.sources
         destinations = snapshot.destinations
 
@@ -1165,10 +1376,14 @@ final class AppModel: ObservableObject {
                   transmissionEnabled else { return }
         }
         for bank in 0..<activeBankCount where runtimeStates[bank].destinationConnected {
-            guard enforceEthernetSafetyBeforeSend() else { return }
-            let status = midi.send(HUI.pingRequest.bytes, toBank: bank)
-            if let status, status != noErr {
-                lastIssue = "Initial HUI keepalive failed for bank \(bank + 1) (OSStatus \(status))."
+            guard initializeBank(bank) else {
+                guard transmissionEnabled else { return }
+                lastIssue = "Logic-compatible HUI initialization failed for bank \(bank + 1)."
+                continue
+            }
+            if nominalVerified, nominalLockEnabled, !sendBankSnapshot(bank: bank) {
+                guard transmissionEnabled else { return }
+                lastIssue = "Initial full-fader snapshot failed for bank \(bank + 1)."
             }
         }
     }
@@ -1190,10 +1405,16 @@ final class AppModel: ObservableObject {
             return nil
         }
 
+        let portNumber = bank + 1
+        if let nativePort = candidates.first(where: {
+            $0.name == "SwiftMix Ethernet Port \(portNumber)"
+        }) {
+            return nativePort
+        }
+
         let ipMIDICandidates = candidates.filter {
             $0.name.localizedCaseInsensitiveContains("ipmidi")
         }
-        let portNumber = bank + 1
         if let namedPort = ipMIDICandidates.first(where: {
             let numberComponents = $0.name.components(separatedBy: CharacterSet.decimalDigits.inverted)
             return numberComponents.contains(String(portNumber))
@@ -1213,9 +1434,21 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if dawTakeoverEnabled,
+           dawTakeoverProfile == .logicProHUI,
+           dawBankSelection.bankIndices.contains(bank) {
+            guard let status = midi.sendHUIToLogic(event.bytes, bank: bank), status == noErr else {
+                lastIssue = "Could not forward SwiftMix Bank \(bank + 1) HUI traffic to Logic."
+                return
+            }
+        }
+
         let messages = streamParsers[bank].consume(event.bytes)
         for message in messages {
-            if message == HUI.pingRequest {
+            let isHostLEDMessage = message.bytes.count == 3
+                && message.bytes[0] == 0xB0
+                && (message.bytes[1] == 0x0C || message.bytes[1] == 0x2C)
+            if message == HUI.pingRequest || isHostLEDMessage {
                 localEchoDetected = true
                 if isCommissioningActive {
                     abortCommissioning(
@@ -1223,7 +1456,7 @@ final class AppModel: ObservableObject {
                         attemptNominalRestoration: true
                     )
                 } else {
-                    lastIssue = "Outgoing HUI ping was received on bank \(bank + 1). Fix the ipMIDI loopback before enabling fader control."
+                    lastIssue = "Outgoing HUI host traffic was received on bank \(bank + 1). Disable MIDI/network loopback before enabling fader control."
                 }
                 let loopbackIssue = lastIssue
                 disableAllMIDITransmission()
@@ -1247,8 +1480,11 @@ final class AppModel: ObservableObject {
                     )
 
                     let channel = bank * 8 + fader
+                    if sceneCaptureEnabled, sceneCapturePositions?.indices.contains(channel) == true {
+                        sceneCapturePositions?[channel] = value
+                    }
                     if isCommissioningActive {
-                        if !isImmediateCommandEcho(
+                        if event.isNativeEthernet || !isImmediateCommandEcho(
                             channel: channel,
                             value: value,
                             receivedUptime: event.receivedUptime
@@ -1256,26 +1492,44 @@ final class AppModel: ObservableObject {
                             processCommissioningReport(
                                 channel: channel,
                                 value: value,
-                                receivedUptime: event.receivedUptime
+                                receivedUptime: event.receivedUptime,
+                                trustedDirectTargetReport: event.isNativeEthernet
                             )
                         }
-                    } else if dawTakeoverEnabled {
+                    } else if dawTakeoverEnabled,
+                              dawTakeoverProfile != .logicProHUI,
+                              dawBankSelection.bankIndices.contains(bank) {
                         sendDAWPosition(channel: channel, value: value)
                     } else {
                         let policy = NominalLockPolicy(
-                            nominalValue: nominalValue,
+                            nominalValue: lockTarget(for: channel),
                             tolerance: tolerance
                         )
-                        if let restoreValue = policy.restoreValue(
-                            observedValue: value,
-                            lockIsArmed: lockIsArmed
-                        ) {
+                        if !touchedChannels.contains(channel),
+                           let restoreValue = policy.restoreValue(
+                               observedValue: value,
+                               lockIsArmed: lockIsArmed
+                           ) {
                             _ = sendFader(bank: bank, fader: fader, value: restoreValue)
                         }
                     }
                 case let .faderTouch(fader, touched):
-                    if dawTakeoverEnabled {
-                        sendDAWTouch(channel: bank * 8 + fader, touched: touched)
+                    let channel = bank * 8 + fader
+                    if touched {
+                        touchedChannels.insert(channel)
+                    } else {
+                        touchedChannels.remove(channel)
+                    }
+
+                    if dawTakeoverEnabled,
+                       dawTakeoverProfile != .logicProHUI,
+                       dawBankSelection.bankIndices.contains(bank) {
+                        sendDAWTouch(channel: channel, touched: touched)
+                    } else if !touched, lockIsArmed {
+                        let bankChannels = (bank * 8)..<((bank + 1) * 8)
+                        if !bankChannels.contains(where: touchedChannels.contains) {
+                            _ = sendFader(bank: bank, fader: fader, value: lockTarget(for: channel))
+                        }
                     }
                 }
             }
@@ -1290,13 +1544,15 @@ final class AppModel: ObservableObject {
     private func processCommissioningReport(
         channel: Int,
         value: Int,
-        receivedUptime: TimeInterval
+        receivedUptime: TimeInterval,
+        trustedDirectTargetReport: Bool
     ) {
         guard var sequence = commissioningSequence,
               let action = sequence.observe(
                 channel: channel,
                 value: value,
-                at: receivedUptime
+                at: receivedUptime,
+                trustedDirectTargetReport: trustedDirectTargetReport
               ) else {
             return
         }
@@ -1317,14 +1573,46 @@ final class AppModel: ObservableObject {
         let now = ProcessInfo.processInfo.systemUptime
         switch commissioningPhase {
         case .testing:
-            guard var sequence = commissioningSequence,
-                  let action = sequence.tick(at: now) else {
+            guard let stage = deskExerciseStage,
+                  let stageStarted = deskExerciseStageStartedUptime,
+                  now - stageStarted >= Self.deskExerciseStageDuration else {
                 return
             }
-            commissioningSequence = sequence
-            commissioningPhase = sequence.phase
-            commissioningCompletedChannels = sequence.completedChannelCount
-            handleCommissioningAction(action)
+
+            switch stage {
+            case .maximum:
+                guard sendAllFaders(value: Self.deskExerciseLowValue) else {
+                    abortCommissioning(
+                        reason: "The active transport rejected the full-desk low command.",
+                        attemptNominalRestoration: true
+                    )
+                    return
+                }
+                deskExerciseStage = .low
+                deskExerciseStageStartedUptime = now
+                commissioningPhase = .testing(channel: 0, target: .minimum)
+            case .low:
+                guard sendAllFaders(value: nominalValue) else {
+                    abortCommissioning(
+                        reason: "The active transport rejected the full-desk nominal command.",
+                        attemptNominalRestoration: true
+                    )
+                    return
+                }
+                deskExerciseStage = .nominal
+                deskExerciseStageStartedUptime = now
+                commissioningPhase = .testing(channel: 0, target: .nominal)
+            case .nominal:
+                commissioningTask?.cancel()
+                commissioningTask = nil
+                deskExerciseStage = nil
+                deskExerciseStageStartedUptime = nil
+                commissioningPhase = .idle
+                commissioningCompletedChannels = 32
+                commissioningPassedThisSession = true
+                lastReassertionUptime = now
+                lastIssue = "Full-desk exercise completed maximum → raw 300 → verified nominal. Visually confirm all 32 faders completed the movement."
+            }
         case .vegas:
             guard allActiveBanksOnline, let vegasStartedUptime else {
                 abortCommissioning(
@@ -1383,6 +1671,8 @@ final class AppModel: ObservableObject {
         commissioningTask = nil
         commissioningSequence?.stop()
         commissioningSequence = nil
+        deskExerciseStage = nil
+        deskExerciseStageStartedUptime = nil
         commissioningPhase = .idle
         commissioningCompletedChannels = 0
         vegasStartedUptime = nil
@@ -1391,7 +1681,7 @@ final class AppModel: ObservableObject {
             let restoredNominal = restoreAllActiveFadersToNominal()
             guard transmissionEnabled else { return }
             if restoredNominal {
-                lastIssue = "\(reason) CoreMIDI accepted a nominal restoration for all 32 faders; visually verify the desk before reconnecting audio."
+                lastIssue = "\(reason) The active transport accepted a nominal restoration for all 32 faders; visually verify the desk before reconnecting audio."
             } else {
                 lastIssue = "\(reason) Nominal restoration was incomplete; keep audio disconnected and inspect the desk."
             }
@@ -1405,6 +1695,8 @@ final class AppModel: ObservableObject {
         commissioningTask = nil
         commissioningSequence?.stop()
         commissioningSequence = nil
+        deskExerciseStage = nil
+        deskExerciseStageStartedUptime = nil
         commissioningPhase = .idle
         commissioningCompletedChannels = 0
         vegasStartedUptime = nil
@@ -1462,8 +1754,10 @@ final class AppModel: ObservableObject {
             return
         }
 
-        if lockIsArmed, allActiveBanksOnline, now - lastReassertionUptime >= 5 {
-            applyNominalToAllFaders()
+        if lockIsArmed,
+           allActiveBanksOnline,
+           now - lastReassertionUptime >= Self.nominalReassertionInterval {
+            reassertNominalOnUntouchedBanks()
         }
     }
 
@@ -1471,7 +1765,8 @@ final class AppModel: ObservableObject {
         guard enforceEthernetSafetyBeforeSend() else { return }
         let mapping = DAWTakeoverMapping(
             midiChannel: dawMIDIChannel - 1,
-            controllerBase: dawControllerBase
+            controllerBase: dawControllerBase,
+            profile: dawTakeoverProfile
         )
         guard let message = try? mapping.positionMessage(fader: channel, value: value),
               let status = midi.sendToDAW([message.bytes]),
@@ -1485,7 +1780,8 @@ final class AppModel: ObservableObject {
         guard enforceEthernetSafetyBeforeSend() else { return }
         let mapping = DAWTakeoverMapping(
             midiChannel: dawMIDIChannel - 1,
-            controllerBase: dawControllerBase
+            controllerBase: dawControllerBase,
+            profile: dawTakeoverProfile
         )
         guard let message = try? mapping.touchMessage(fader: channel, touched: touched),
               let status = midi.sendToDAW([message.bytes]),
@@ -1495,20 +1791,77 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func restoreAllActiveFadersToNominal() -> Bool {
-        guard transmissionEnabled, nominalVerified else { return false }
+    private func initializeBank(_ bank: Int) -> Bool {
+        guard transmissionEnabled,
+              enforceEthernetSafetyBeforeSend(),
+              runtimeStates.indices.contains(bank),
+              runtimeStates[bank].destinationConnected else {
+            return false
+        }
 
-        var allMessagesSent = true
+        let initializationStatus = midi.send(
+            HUI.bankInitialization.map(\.bytes),
+            toBank: bank
+        )
+        guard initializationStatus == noErr else { return false }
+
+        let pingStatus = midi.send(HUI.pingRequest.bytes, toBank: bank)
+        return pingStatus == noErr
+    }
+
+    private func sendBankSnapshot(bank: Int) -> Bool {
+        guard transmissionEnabled,
+              enforceEthernetSafetyBeforeSend(),
+              commandedBankValues.indices.contains(bank),
+              runtimeStates.indices.contains(bank),
+              runtimeStates[bank].destinationConnected,
+              let messages = try? HUI.bankSnapshot(values: commandedBankValues[bank]),
+              let status = midi.send(messages.map(\.bytes), toBank: bank),
+              status == noErr else {
+            return false
+        }
+        return true
+    }
+
+    private func reassertNominalOnUntouchedBanks() {
+        var failedBanks: [Int] = []
         for bank in 0..<activeBankCount {
+            let channels = (bank * 8)..<((bank + 1) * 8)
+            guard !channels.contains(where: touchedChannels.contains) else { continue }
+
+            commandedBankValues[bank] = channels.map { lockTarget(for: $0) }
+            if !sendBankSnapshot(bank: bank) {
+                guard transmissionEnabled else { return }
+                failedBanks.append(bank + 1)
+            }
+        }
+
+        lastReassertionUptime = ProcessInfo.processInfo.systemUptime
+        if !failedBanks.isEmpty {
+            lastIssue = "Timed nominal reassertion failed for banks \(failedBanks)."
+        }
+    }
+
+    private func restoreAllActiveFadersToNominal() -> Bool {
+        restoreBanksToNominal(Array(0..<activeBankCount))
+    }
+
+    private func restoreBanksToNominal(_ banks: [Int]) -> Bool {
+        guard transmissionEnabled, nominalVerified, !banks.isEmpty else { return false }
+
+        activeSceneID = nil
+        sceneCaptureEnabled = false
+        sceneCapturePositions = nil
+        var allMessagesSent = true
+        for bank in banks {
             guard runtimeStates[bank].destinationConnected else {
                 allMessagesSent = false
                 continue
             }
-            for fader in 0..<8 {
-                if !sendFader(bank: bank, fader: fader, value: nominalValue) {
-                    guard transmissionEnabled else { return false }
-                    allMessagesSent = false
-                }
+            commandedBankValues[bank] = Array(repeating: nominalValue, count: 8)
+            if !sendBankSnapshot(bank: bank) {
+                guard transmissionEnabled else { return false }
+                allMessagesSent = false
             }
         }
 
@@ -1516,6 +1869,22 @@ final class AppModel: ObservableObject {
             lastReassertionUptime = ProcessInfo.processInfo.systemUptime
         }
         return allMessagesSent
+    }
+
+    @discardableResult
+    private func sendAllFaders(value: Int) -> Bool {
+        guard transmissionEnabled,
+              (HUI.minimumFaderValue...HUI.maximumFaderValue).contains(value),
+              activeBankCount == 4,
+              allActiveBanksOnline else {
+            return false
+        }
+
+        for bank in 0..<4 {
+            commandedBankValues[bank] = Array(repeating: value, count: 8)
+            guard sendBankSnapshot(bank: bank) else { return false }
+        }
+        return true
     }
 
     @discardableResult
@@ -1538,14 +1907,18 @@ final class AppModel: ObservableObject {
             lastIssue = "Bank \(bank + 1) has no connected MIDI destination."
             return false
         }
-        guard let messages = try? HUI.faderPosition(fader: fader, value: value) else {
+        guard (0..<8).contains(fader),
+              (HUI.minimumFaderValue...HUI.maximumFaderValue).contains(value) else {
             lastIssue = "Invalid HUI fader command for bank \(bank + 1), fader \(fader + 1)."
             return false
         }
 
+        let previousValue = commandedBankValues[bank][fader]
+        commandedBankValues[bank][fader] = value
         let sentUptime = ProcessInfo.processInfo.systemUptime
-        guard let status = midi.send(messages.map(\.bytes), toBank: bank), status == noErr else {
-            lastIssue = "Could not send to bank \(bank + 1), fader \(fader + 1)."
+        guard sendBankSnapshot(bank: bank) else {
+            commandedBankValues[bank][fader] = previousValue
+            lastIssue = "Could not send the full snapshot for bank \(bank + 1), fader \(fader + 1)."
             return false
         }
 
@@ -1578,7 +1951,7 @@ final class AppModel: ObservableObject {
         case .maximum:
             return "maximum"
         case .minimum:
-            return "minimum (−∞)"
+            return "low position (raw \(Self.deskExerciseLowValue))"
         case .nominal:
             return "verified nominal"
         }
@@ -1588,6 +1961,19 @@ final class AppModel: ObservableObject {
         switch failure {
         case let .timedOut(channel, target):
             return "Channel \(channel + 1) did not report \(targetDescription(target)) before the 8-second timeout."
+        }
+    }
+
+    private func lockTarget(for channel: Int) -> Int {
+        if let activeScene, activeScene.positions.indices.contains(channel) {
+            return activeScene.positions[channel]
+        }
+        return nominalValue
+    }
+
+    private func persistScenes() {
+        if let data = try? JSONEncoder().encode(scenes) {
+            defaults.set(data, forKey: DefaultsKey.scenes)
         }
     }
 

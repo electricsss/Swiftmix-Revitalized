@@ -18,6 +18,11 @@ dist/
 *.app/
 *.dSYM/
 
+# Generated app icon intermediates and local reference artwork
+Packaging/AppIcon.iconset/
+Packaging/AppIconBase.png
+Sources/rupert-neve-designs-swiftmix_2.png
+
 # Project-local temporary files
 .tmp/
 tmp/

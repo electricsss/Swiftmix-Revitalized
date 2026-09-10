@@ -1,5 +1,6 @@
 import Darwin
 import SwiftMixCore
+import SwiftMixNativeUDP
 
 var failures: [String] = []
 var checks = 0
@@ -14,6 +15,15 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 expect(HUI.pingRequest.bytes == [0x90, 0x00, 0x00], "Ping request bytes")
 expect(HUI.pingReply.bytes == [0x90, 0x00, 0x7F], "Ping reply bytes")
 expect(HUI.defaultNominalValue == 12_320, "SwiftMix nominal default")
+
+let nativeWireProfile = ProvisionalIPMIDIWireProfile.unverifiedIPMIDIDefaults
+expect(nativeWireProfile.multicastGroup.value.description == "225.0.0.37", "Native multicast group")
+expect(nativeWireProfile.port(for: .bank1) == 21_928, "Native Bank 1 UDP port")
+expect(nativeWireProfile.port(for: .bank2) == 21_929, "Native Bank 2 UDP port")
+expect(nativeWireProfile.port(for: .bank3) == 21_930, "Native Bank 3 UDP port")
+expect(nativeWireProfile.port(for: .bank4) == 21_931, "Native Bank 4 UDP port")
+expect(nativeWireProfile.multicastTTL.value == 255, "Native host multicast TTL")
+expect(!nativeWireProfile.localMulticastLoopback.value, "Native multicast loopback disabled")
 
 let nominal = HUI.defaultNominalValue
 
@@ -30,6 +40,51 @@ do {
     failures.append("Nominal fader encoding unexpectedly threw: \(error)")
 }
 
+expect(HUI.bankInitialization.count == 16, "Bank initialization message count")
+expect(
+    HUI.bankInitialization.prefix(2) == [
+        MIDIMessage([0xB0, 0x0C, 0x00]),
+        MIDIMessage([0xB0, 0x2C, 0x07])
+    ],
+    "Bank initialization starts with Logic-compatible zone zero state"
+)
+expect(
+    HUI.bankInitialization.suffix(2) == [
+        MIDIMessage([0xB0, 0x0C, 0x07]),
+        MIDIMessage([0xB0, 0x2C, 0x07])
+    ],
+    "Bank initialization ends with Logic-compatible zone seven state"
+)
+
+do {
+    let snapshot = try HUI.bankSnapshot(values: Array(repeating: nominal, count: 8))
+    expect(snapshot.count == 16, "Full bank snapshot message count")
+    expect(
+        snapshot.prefix(2) == [
+            MIDIMessage([0xB0, 0x00, 0x60]),
+            MIDIMessage([0xB0, 0x20, 0x20])
+        ],
+        "Full bank snapshot starts with Fader 1 nominal"
+    )
+    expect(
+        snapshot.suffix(2) == [
+            MIDIMessage([0xB0, 0x07, 0x60]),
+            MIDIMessage([0xB0, 0x27, 0x20])
+        ],
+        "Full bank snapshot ends with Fader 8 nominal"
+    )
+} catch {
+    failures.append("Valid full bank snapshot unexpectedly threw: \(error)")
+}
+
+do {
+    _ = try HUI.bankSnapshot(values: Array(repeating: nominal, count: 7))
+    failures.append("Short bank snapshot was accepted")
+} catch HUIEncodingError.invalidBankSnapshotCount(7) {
+    checks += 1
+} catch {
+    failures.append("Short bank snapshot returned the wrong error: \(error)")
+}
 
 do {
     _ = try HUI.faderPosition(fader: 8, value: 0)
@@ -86,6 +141,23 @@ expect(policy.restoreValue(observedValue: 10_000, lockIsArmed: true) == nominal,
 expect(NominalLockPolicy(nominalValue: -1, tolerance: -10).nominalValue == 0, "Minimum value clamp")
 expect(NominalLockPolicy(nominalValue: 20_000).nominalValue == 16_383, "Maximum value clamp")
 expect(NominalLockPolicy(tolerance: -10).tolerance == 0, "Tolerance clamp")
+
+var trustedNativeSequence = CommissioningSequence(
+    channelCount: 1,
+    nominalValue: nominal,
+    nominalTolerance: 32,
+    stageTimeout: 8
+)
+_ = trustedNativeSequence.start(at: 5)
+expect(
+    trustedNativeSequence.observe(
+        channel: 0,
+        value: HUI.maximumFaderValue,
+        at: 5.1,
+        trustedDirectTargetReport: true
+    ) == .send(channel: 0, value: HUI.minimumFaderValue),
+    "Trusted native settled-target report advances without an intermediate position"
+)
 
 var sequence = CommissioningSequence(
     channelCount: 2,
@@ -170,6 +242,18 @@ expect((8_190...8_193).contains(wave.value(channel: 0, elapsed: 0)), "Vegas midp
 expect(wave.value(channel: 1, elapsed: 0) == HUI.maximumFaderValue, "Vegas crest")
 expect(wave.value(channel: 3, elapsed: 0) == HUI.minimumFaderValue, "Vegas trough")
 
+expect(DAWBankSelection.all.bankIndices == [0, 1, 2, 3], "DAW all-bank selection")
+expect(DAWBankSelection.bank1.bankIndices == [0], "DAW Bank 1 selection")
+expect(DAWBankSelection.bank2.bankIndices == [1], "DAW Bank 2 selection")
+expect(DAWBankSelection.bank3.bankIndices == [2], "DAW Bank 3 selection")
+expect(DAWBankSelection.bank4.bankIndices == [3], "DAW Bank 4 selection")
+
+expect(DAWTakeoverProfile.genericLinear.sevenBitValue(forRawValue: 0) == 0, "Generic DAW minimum")
+expect(DAWTakeoverProfile.genericLinear.sevenBitValue(forRawValue: HUI.maximumFaderValue) == 127, "Generic DAW maximum")
+expect(DAWTakeoverProfile.abletonLive.sevenBitValue(forRawValue: 0) == 0, "Ableton minimum")
+expect(DAWTakeoverProfile.abletonLive.sevenBitValue(forRawValue: nominal) == 108, "Ableton 0 dB anchor")
+expect(DAWTakeoverProfile.abletonLive.sevenBitValue(forRawValue: HUI.maximumFaderValue) == 127, "Ableton maximum")
+
 let dawMapping = DAWTakeoverMapping()
 do {
     let firstMinimum = try dawMapping.positionMessage(
@@ -210,6 +294,14 @@ do {
     checks += 1
 } catch {
     failures.append("Invalid DAW fader returned the wrong error: \(error)")
+}
+
+let abletonMapping = DAWTakeoverMapping(profile: .abletonLive)
+do {
+    let nominalMessage = try abletonMapping.positionMessage(fader: 0, value: nominal)
+    expect(nominalMessage.bytes == [0xB0, 0x10, 108], "Ableton mapped nominal message")
+} catch {
+    failures.append("Ableton nominal mapping unexpectedly threw: \(error)")
 }
 
 let clampedDAWMapping = DAWTakeoverMapping(midiChannel: 20, controllerBase: 120)
