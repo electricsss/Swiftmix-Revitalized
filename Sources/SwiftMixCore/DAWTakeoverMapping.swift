@@ -34,6 +34,7 @@ public enum DAWTakeoverProfile: String, CaseIterable, Codable, Identifiable, Sen
     case genericLinear
     case abletonLive
     case logicProHUI
+    case proToolsHUI
 
     public var id: String { rawValue }
 
@@ -42,6 +43,7 @@ public enum DAWTakeoverProfile: String, CaseIterable, Codable, Identifiable, Sen
         case .genericLinear: return "Generic Linear"
         case .abletonLive: return "Ableton Live"
         case .logicProHUI: return "Logic Pro (HUI Bridge)"
+        case .proToolsHUI: return "Pro Tools (HUI Bridge)"
         }
     }
 
@@ -53,13 +55,22 @@ public enum DAWTakeoverProfile: String, CaseIterable, Codable, Identifiable, Sen
             return "Anchors SwiftMix 0 dB (raw 12320) to Ableton 0 dB (CC 108)"
         case .logicProHUI:
             return "Four bidirectional virtual HUI banks bridge Logic directly to native SwiftMix Ethernet"
+        case .proToolsHUI:
+            return "Four bidirectional virtual HUI peripherals bridge Pro Tools directly to native SwiftMix Ethernet"
+        }
+    }
+
+    public var usesBidirectionalHUIBridge: Bool {
+        switch self {
+        case .logicProHUI, .proToolsHUI: return true
+        case .genericLinear, .abletonLive: return false
         }
     }
 
     public func sevenBitValue(forRawValue value: Int) -> UInt8 {
         let raw = min(max(value, HUI.minimumFaderValue), HUI.maximumFaderValue)
         switch self {
-        case .genericLinear, .logicProHUI:
+        case .genericLinear, .logicProHUI, .proToolsHUI:
             return UInt8((raw * 127 + HUI.maximumFaderValue / 2) / HUI.maximumFaderValue)
         case .abletonLive:
             let consoleNominal = HUI.defaultNominalValue

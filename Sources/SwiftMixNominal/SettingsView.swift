@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var showVerificationConfirmation = false
     @State private var showTransmissionConfirmation = false
     @State private var showCommissioningConfirmation = false
+    @State private var showVegasConfirmation = false
     @State private var showDAWTakeoverConfirmation = false
     @State private var sceneName = ""
 
@@ -22,6 +23,7 @@ struct SettingsView: View {
                 commissioningSection
                 dawTakeoverSection
                 startupSection
+                vegasSection
             }
             .padding(20)
         }
@@ -58,14 +60,22 @@ struct SettingsView: View {
         } message: {
             Text("This moves all 32 faders together: maximum, low raw 300, then verified nominal. Each position is held for three seconds. The test finishes at nominal and requires your visual confirmation; it does not rely on motor-position reports. Confirm that all console inputs, outputs, DAW paths, speakers, headphones, and in-ear feeds are muted or physically disconnected.")
         }
+        .alert("Run Vegas Mode for one minute?", isPresented: $showVegasConfirmation) {
+            Button("Muted/Disconnected — Run Vegas Mode", role: .destructive) {
+                model.startVegasMode()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This moves all 32 motorized faders in a sine wave and flashes all channel-strip lights for one minute, then switches the lights off and returns every fader to verified nominal. Confirm that all affected audio paths are muted or physically disconnected.")
+        }
         .alert("Enable DAW Takeover?", isPresented: $showDAWTakeoverConfirmation) {
             Button("Enable Selected DAW Mode", role: .destructive) {
                 model.enableDAWTakeover()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(model.dawTakeoverProfile == .logicProHUI
-                ? "This creates temporary bidirectional HUI port pairs only for the selected bank or banks and bridges them to native Ethernet. The ports are disposed when Takeover stops. Remove old ipMIDI HUI assignments and keep audio paths safe during the first test."
+            Text(model.dawTakeoverProfile.usesBidirectionalHUIBridge
+                ? "This creates temporary bidirectional HUI port pairs for the selected DAW and bank or banks, then bridges raw HUI to native SwiftMix Ethernet. The ports are disposed when Takeover stops. Remove old ipMIDI HUI assignments and keep audio paths safe during the first test."
                 : "Nominal Lock will be suspended while takeover is active. Moving a physical fader changes the console’s real analog level. This generic MIDI mode sends controller data to the DAW but does not accept playback commands back to the console.")
         }
     }
@@ -369,34 +379,37 @@ struct SettingsView: View {
     private var dawTakeoverSection: some View {
         GroupBox("DAW Takeover") {
             VStack(alignment: .leading, spacing: 12) {
-                if model.dawTakeoverProfile == .logicProHUI {
-                    Text("When enabled, temporary bidirectional HUI port pairs appear only for the selected bank or banks. Configure one Logic HUI device per active bank: Logic input = ‘Bank N Output’; Logic output = ‘Bank N Input’. The bridge forwards raw HUI between Logic and native Ethernet without ipMIDI.")
-                } else {
+                switch model.dawTakeoverProfile {
+                case .logicProHUI:
+                    Text("When enabled, temporary bidirectional HUI port pairs appear for the selected banks. Configure one Logic HUI device per bank: Logic input = ‘SwiftMix Logic Pro HUI Bank N Output’; Logic output = ‘SwiftMix Logic Pro HUI Bank N Input’.")
+                case .proToolsHUI:
+                    Text("In Pro Tools, open Setup → Peripherals → MIDI Controllers. Add one HUI peripheral per selected bank with 8 channels. Set Receive From to ‘SwiftMix Pro Tools HUI Bank N Output’ and Send To to ‘SwiftMix Pro Tools HUI Bank N Input’. The bridge forwards raw HUI to the SwiftMix Ethernet banks without ipMIDI.")
+                case .genericLinear, .abletonLive:
                     Text("Choose “SwiftMix DAW Takeover” as a MIDI input in the DAW. Faders 1–32 publish adjacent 7-bit CC messages; touch states publish notes 36–67. Use MIDI Learn or controller mapping.")
-                }
 
-                Picker(
-                    "MIDI channel",
-                    selection: Binding(
-                        get: { model.dawMIDIChannel },
-                        set: { model.setDAWMIDIChannel($0) }
-                    )
-                ) {
-                    ForEach(1...16, id: \.self) { channel in
-                        Text("\(channel)").tag(channel)
+                    Picker(
+                        "MIDI channel",
+                        selection: Binding(
+                            get: { model.dawMIDIChannel },
+                            set: { model.setDAWMIDIChannel($0) }
+                        )
+                    ) {
+                        ForEach(1...16, id: \.self) { channel in
+                            Text("\(channel)").tag(channel)
+                        }
                     }
-                }
-                .disabled(model.dawTakeoverEnabled)
+                    .disabled(model.dawTakeoverEnabled)
 
-                Stepper(
-                    "Fader CC range: \(model.dawControllerBase)–\(model.dawControllerBase + 31)",
-                    value: Binding(
-                        get: { model.dawControllerBase },
-                        set: { model.setDAWControllerBase($0) }
-                    ),
-                    in: 0...96
-                )
-                .disabled(model.dawTakeoverEnabled)
+                    Stepper(
+                        "Fader CC range: \(model.dawControllerBase)–\(model.dawControllerBase + 31)",
+                        value: Binding(
+                            get: { model.dawControllerBase },
+                            set: { model.setDAWControllerBase($0) }
+                        ),
+                        in: 0...96
+                    )
+                    .disabled(model.dawTakeoverEnabled)
+                }
 
                 if model.dawTakeoverEnabled {
                     HStack {
@@ -453,9 +466,9 @@ struct SettingsView: View {
                     }
                 }
 
-                Text(model.dawTakeoverProfile == .logicProHUI
-                    ? "Logic HUI ports exist only while this preset’s Takeover mode is active. Stopping Takeover closes the selected virtual endpoint pairs and returns only the selected bank or banks to nominal."
-                    : "Generic and Ableton profiles are one-way MIDI automation output. Select Logic Pro (HUI Bridge) for bidirectional HUI and motor automation without ipMIDI.")
+                Text(model.dawTakeoverProfile.usesBidirectionalHUIBridge
+                    ? "HUI ports exist only while this Takeover mode is active. Stopping Takeover closes the selected virtual endpoint pairs and returns only the selected bank or banks to nominal."
+                    : "Generic and Ableton profiles are one-way MIDI automation output. Select a Logic Pro or Pro Tools HUI Bridge for bidirectional HUI and motor automation without ipMIDI.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -486,6 +499,35 @@ struct SettingsView: View {
                 Text("Fresh installations start in monitor-only mode. Automatic transmission is tied to the exact selected Ethernet service ID and underlying BSD interface and can be authorized only after this session’s full-desk maximum, low, and nominal exercise completes. At a future launch the gate opens only if that same service ID resolves to the authorized BSD interface and is active; the exercise never resumes automatically.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var vegasSection: some View {
+        GroupBox("Vegas Mode") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Runs a sine wave across all 32 faders and flashes every channel-strip light for one minute. It then turns the lights off and restores all faders to verified nominal.")
+                    .foregroundStyle(.secondary)
+
+                if model.isVegasMode {
+                    Button("Stop Vegas Mode & Return All to Nominal") {
+                        model.stopCommissioningAndRestoreNominal()
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Run Vegas Mode for 1 Minute…") {
+                        showVegasConfirmation = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canStartCommissioningTest)
+
+                    if let reason = model.commissioningBlockReason {
+                        Text("Not ready: \(reason)")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

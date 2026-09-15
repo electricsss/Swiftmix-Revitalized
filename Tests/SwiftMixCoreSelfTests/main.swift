@@ -55,6 +55,18 @@ expect(
     ],
     "Bank initialization ends with Logic-compatible zone seven state"
 )
+expect(HUI.channelStripLights(on: true).count == 16, "Channel-strip lights-on message count")
+expect(
+    HUI.channelStripLights(on: true).prefix(2) == [
+        MIDIMessage([0xB0, 0x0C, 0x00]),
+        MIDIMessage([0xB0, 0x2C, 0x47])
+    ],
+    "Channel-strip light on sets HUI state bit"
+)
+expect(
+    HUI.channelStripLights(on: false) == HUI.bankInitialization,
+    "Channel-strip lights off matches bank initialization"
+)
 
 do {
     let snapshot = try HUI.bankSnapshot(values: Array(repeating: nominal, count: 8))
@@ -253,6 +265,9 @@ expect(DAWTakeoverProfile.genericLinear.sevenBitValue(forRawValue: HUI.maximumFa
 expect(DAWTakeoverProfile.abletonLive.sevenBitValue(forRawValue: 0) == 0, "Ableton minimum")
 expect(DAWTakeoverProfile.abletonLive.sevenBitValue(forRawValue: nominal) == 108, "Ableton 0 dB anchor")
 expect(DAWTakeoverProfile.abletonLive.sevenBitValue(forRawValue: HUI.maximumFaderValue) == 127, "Ableton maximum")
+expect(DAWTakeoverProfile.logicProHUI.usesBidirectionalHUIBridge, "Logic uses bidirectional HUI")
+expect(DAWTakeoverProfile.proToolsHUI.usesBidirectionalHUIBridge, "Pro Tools uses bidirectional HUI")
+expect(!DAWTakeoverProfile.genericLinear.usesBidirectionalHUIBridge, "Generic DAW mapping stays one-way")
 
 let dawMapping = DAWTakeoverMapping()
 do {

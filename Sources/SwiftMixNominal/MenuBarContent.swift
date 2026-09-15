@@ -49,6 +49,7 @@ struct MenuBarContent: View {
         }
         .disabled(!model.canApplyNominal)
 
+
         Divider()
 
         Text("Snapshot Quick Recall")

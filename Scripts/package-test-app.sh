@@ -20,6 +20,14 @@ swift build --package-path "$PROJECT_DIR" -c release --arch x86_64 --build-path 
 
 ARM_BINARY="$ARM_BUILD/arm64-apple-macosx/release/SwiftMixNominal"
 X86_BINARY="$X86_BUILD/x86_64-apple-macosx/release/SwiftMixNominal"
+# Swift 6.2/Xcode 26 uses an Xcode-style Products directory for explicit
+# architecture builds; retain the older SwiftPM paths for older toolchains.
+if [ ! -x "$ARM_BINARY" ]; then
+    ARM_BINARY="$ARM_BUILD/out/Products/Release/SwiftMixNominal"
+fi
+if [ ! -x "$X86_BINARY" ]; then
+    X86_BINARY="$X86_BUILD/out/Products/Release/SwiftMixNominal"
+fi
 if [ ! -x "$ARM_BINARY" ] || [ ! -x "$X86_BINARY" ]; then
     echo "Expected release binaries were not produced." >&2
     exit 1

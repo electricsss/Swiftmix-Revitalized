@@ -123,6 +123,9 @@ final class AppModel: ObservableObject {
     )
     private var vegasNextChannel = 0
     private var vegasStartedUptime: TimeInterval?
+    private var vegasEndsUptime: TimeInterval?
+    private var vegasLightsAreOn = false
+    private var vegasLastLightChangeUptime = -Double.infinity
     // Dynamic-store callbacks request immediate full refreshes. While traffic is
     // active, service identity and HUI keepalive are refreshed every 300 ms,
     // matching the cadence observed in the successful Logic-compatible stream.
@@ -133,6 +136,8 @@ final class AppModel: ObservableObject {
     private static let nominalReassertionInterval: TimeInterval = 5 * 60
     private static let deskExerciseStageDuration: TimeInterval = 3
     private static let deskExerciseLowValue = 300
+    private static let vegasDuration: TimeInterval = 60
+    private static let vegasLightInterval: TimeInterval = 0.25
 
     private var lastReassertionUptime = -Double.infinity
     private var lastDirectEthernetValidationUptime = -Double.infinity
@@ -390,7 +395,7 @@ final class AppModel: ObservableObject {
         case let .testing(_, target):
             return "Full-desk exercise: \(targetDescription(target))"
         case .vegas:
-            return "Vegas mode active — use Stop to return all faders to nominal"
+            return "Vegas mode active for one minute — use Stop to return all faders to nominal"
         case let .failed(failure):
             return failureDescription(failure)
         case .idle:
@@ -401,10 +406,14 @@ final class AppModel: ObservableObject {
             return "Scene capture unlocked — move faders, then name and save the scene"
         }
         if dawTakeoverEnabled {
-            if dawTakeoverProfile == .logicProHUI {
+            switch dawTakeoverProfile {
+            case .logicProHUI:
                 return "Logic Pro HUI Bridge active: \(dawBankSelection.displayName)"
+            case .proToolsHUI:
+                return "Pro Tools HUI Bridge active: \(dawBankSelection.displayName)"
+            case .genericLinear, .abletonLive:
+                return "DAW Takeover active: \(dawBankSelection.displayName) — CC \(dawControllerBase)–\(dawControllerBase + 31) on MIDI channel \(dawMIDIChannel)"
             }
-            return "DAW Takeover active: \(dawBankSelection.displayName) — CC \(dawControllerBase)–\(dawControllerBase + 31) on MIDI channel \(dawMIDIChannel)"
         }
         if localEchoDetected {
             return "MIDI loopback detected — all outgoing MIDI was disabled"
@@ -440,7 +449,7 @@ final class AppModel: ObservableObject {
         case let .testing(_, target):
             return "All 32 faders: \(targetDescription(target)). Watch the desk and keep hands clear."
         case .vegas:
-            return "All 32 channels reported nominal. Vegas wave is running continuously, one channel command at a time."
+            return "Vegas mode is running a one-minute fader wave and flashing all channel-strip lights."
         case let .failed(failure):
             return failureDescription(failure)
         case .idle:
@@ -540,7 +549,8 @@ final class AppModel: ObservableObject {
         if !routesAreDistinct(banks: dawBankSelection.bankIndices) {
             return "Selected DAW banks must use distinct MIDI inputs and outputs."
         }
-        if dawTakeoverProfile == .logicProHUI, let dawSetupError = midi.dawSetupError {
+        if dawTakeoverProfile.usesBidirectionalHUIBridge,
+           let dawSetupError = midi.dawSetupError {
             return dawSetupError
         }
         return nil
@@ -668,14 +678,14 @@ final class AppModel: ObservableObject {
 
     func setDAWTakeoverProfile(_ profile: DAWTakeoverProfile) {
         guard !dawTakeoverEnabled else { return }
-        midi.deactivateLogicHUIBridge()
+        midi.deactivateHUIBridge()
         dawTakeoverProfile = profile
         defaults.set(profile.rawValue, forKey: DefaultsKey.dawTakeoverProfile)
     }
 
     func setDAWBankSelection(_ selection: DAWBankSelection) {
         guard !dawTakeoverEnabled else { return }
-        midi.deactivateLogicHUIBridge()
+        midi.deactivateHUIBridge()
         dawBankSelection = selection
         defaults.set(selection.rawValue, forKey: DefaultsKey.dawBankSelection)
     }
@@ -692,10 +702,14 @@ final class AppModel: ObservableObject {
             return
         }
 
-        if dawTakeoverProfile == .logicProHUI,
-           !midi.activateLogicHUIBridge(banks: dawBankSelection.bankIndices) {
-            lastIssue = midi.dawSetupError ?? "Could not create the four Logic HUI bridge port pairs."
-            return
+        if dawTakeoverProfile.usesBidirectionalHUIBridge {
+            let bridgeDAW: HUIBridgeDAW = dawTakeoverProfile == .proToolsHUI
+                ? .proTools
+                : .logicPro
+            guard midi.activateHUIBridge(banks: dawBankSelection.bankIndices, daw: bridgeDAW) else {
+                lastIssue = midi.dawSetupError ?? "Could not create the selected HUI bridge port pairs."
+                return
+            }
         }
         midi.setDAWOutputEnabled(true)
         dawTakeoverEnabled = true
@@ -923,6 +937,48 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func startVegasMode() {
+        guard commissioningBlockReason == nil else {
+            lastIssue = commissioningBlockReason
+            return
+        }
+
+        commissioningTask?.cancel()
+        commissioningSequence = nil
+        deskExerciseStage = nil
+        deskExerciseStageStartedUptime = nil
+        recentFaderCommands.removeAll()
+        touchedChannels.removeAll()
+        commissioningCompletedChannels = 0
+        vegasNextChannel = 0
+        vegasLightsAreOn = false
+        vegasLastLightChangeUptime = -Double.infinity
+        lastIssue = nil
+
+        let now = ProcessInfo.processInfo.systemUptime
+        vegasStartedUptime = now
+        vegasEndsUptime = now + Self.vegasDuration
+        commissioningPhase = .vegas
+
+        guard sendVegasLights(on: true) else {
+            abortCommissioning(
+                reason: "The active transport rejected the Vegas-mode light command.",
+                attemptNominalRestoration: true
+            )
+            return
+        }
+        vegasLightsAreOn = true
+        vegasLastLightChangeUptime = now
+
+        commissioningTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                guard !Task.isCancelled else { break }
+                self?.commissioningTick()
+            }
+        }
+    }
+
     func startFullDeskCommissioningTest() {
         guard commissioningBlockReason == nil else {
             lastIssue = commissioningBlockReason
@@ -975,6 +1031,9 @@ final class AppModel: ObservableObject {
         commissioningPhase = .idle
         commissioningCompletedChannels = 0
         vegasStartedUptime = nil
+        vegasEndsUptime = nil
+        _ = sendVegasLights(on: false)
+        vegasLightsAreOn = false
 
         let restoredNominal = restoreAllActiveFadersToNominal()
         guard transmissionEnabled else { return }
@@ -1435,10 +1494,10 @@ final class AppModel: ObservableObject {
         }
 
         if dawTakeoverEnabled,
-           dawTakeoverProfile == .logicProHUI,
+           dawTakeoverProfile.usesBidirectionalHUIBridge,
            dawBankSelection.bankIndices.contains(bank) {
-            guard let status = midi.sendHUIToLogic(event.bytes, bank: bank), status == noErr else {
-                lastIssue = "Could not forward SwiftMix Bank \(bank + 1) HUI traffic to Logic."
+            guard let status = midi.sendHUIToBridge(event.bytes, bank: bank), status == noErr else {
+                lastIssue = "Could not forward SwiftMix Bank \(bank + 1) HUI traffic to the selected DAW."
                 return
             }
         }
@@ -1497,7 +1556,7 @@ final class AppModel: ObservableObject {
                             )
                         }
                     } else if dawTakeoverEnabled,
-                              dawTakeoverProfile != .logicProHUI,
+                              !dawTakeoverProfile.usesBidirectionalHUIBridge,
                               dawBankSelection.bankIndices.contains(bank) {
                         sendDAWPosition(channel: channel, value: value)
                     } else {
@@ -1522,7 +1581,7 @@ final class AppModel: ObservableObject {
                     }
 
                     if dawTakeoverEnabled,
-                       dawTakeoverProfile != .logicProHUI,
+                       !dawTakeoverProfile.usesBidirectionalHUIBridge,
                        dawBankSelection.bankIndices.contains(bank) {
                         sendDAWTouch(channel: channel, touched: touched)
                     } else if !touched, lockIsArmed {
@@ -1614,12 +1673,44 @@ final class AppModel: ObservableObject {
                 lastIssue = "Full-desk exercise completed maximum → raw 300 → verified nominal. Visually confirm all 32 faders completed the movement."
             }
         case .vegas:
-            guard allActiveBanksOnline, let vegasStartedUptime else {
+            guard allActiveBanksOnline,
+                  let vegasStartedUptime,
+                  let vegasEndsUptime else {
                 abortCommissioning(
                     reason: "A HUI bank went offline during Vegas mode.",
                     attemptNominalRestoration: true
                 )
                 return
+            }
+
+            if now >= vegasEndsUptime {
+                commissioningTask?.cancel()
+                commissioningTask = nil
+                commissioningPhase = .idle
+                self.vegasStartedUptime = nil
+                self.vegasEndsUptime = nil
+                let lightsOff = sendVegasLights(on: false)
+                vegasLightsAreOn = false
+                let restoredNominal = restoreAllActiveFadersToNominal()
+                if lightsOff && restoredNominal {
+                    lastIssue = "Vegas mode completed after one minute. All lights were switched off and the active transport accepted nominal restoration for all 32 faders; visually verify the desk."
+                } else {
+                    lastIssue = "Vegas mode ended, but the light shutdown or nominal restoration was incomplete. Keep audio disconnected and inspect the desk."
+                }
+                return
+            }
+
+            if now - vegasLastLightChangeUptime >= Self.vegasLightInterval {
+                let lightsOn = !vegasLightsAreOn
+                guard sendVegasLights(on: lightsOn) else {
+                    abortCommissioning(
+                        reason: "The active transport rejected a Vegas-mode light command.",
+                        attemptNominalRestoration: true
+                    )
+                    return
+                }
+                vegasLightsAreOn = lightsOn
+                vegasLastLightChangeUptime = now
             }
 
             let wave = VegasWave(channelCount: 32)
@@ -1676,6 +1767,9 @@ final class AppModel: ObservableObject {
         commissioningPhase = .idle
         commissioningCompletedChannels = 0
         vegasStartedUptime = nil
+        vegasEndsUptime = nil
+        if transmissionEnabled { _ = sendVegasLights(on: false) }
+        vegasLightsAreOn = false
 
         if attemptNominalRestoration, transmissionEnabled, nominalVerified {
             let restoredNominal = restoreAllActiveFadersToNominal()
@@ -1700,6 +1794,8 @@ final class AppModel: ObservableObject {
         commissioningPhase = .idle
         commissioningCompletedChannels = 0
         vegasStartedUptime = nil
+        vegasEndsUptime = nil
+        vegasLightsAreOn = false
     }
 
     private func isImmediateCommandEcho(
@@ -1789,6 +1885,19 @@ final class AppModel: ObservableObject {
             lastIssue = "Could not publish channel \(channel + 1) touch state to the DAW virtual MIDI input."
             return
         }
+    }
+
+    private func sendVegasLights(on: Bool) -> Bool {
+        guard transmissionEnabled, enforceEthernetSafetyBeforeSend() else { return false }
+        let messages = HUI.channelStripLights(on: on).map(\.bytes)
+        for bank in 0..<4 {
+            guard runtimeStates.indices.contains(bank),
+                  runtimeStates[bank].destinationConnected,
+                  midi.send(messages, toBank: bank) == noErr else {
+                return false
+            }
+        }
+        return true
     }
 
     private func initializeBank(_ bank: Int) -> Bool {

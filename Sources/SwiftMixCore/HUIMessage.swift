@@ -29,11 +29,18 @@ public enum HUI {
 
     /// Logic-compatible channel-strip state observed at the start of the
     /// successful SwiftMix automation capture. Send once when a bank connects.
-    public static let bankInitialization: [MIDIMessage] = (0..<8).flatMap { zone in
-        [
-            MIDIMessage([0xB0, 0x0C, UInt8(zone)]),
-            MIDIMessage([0xB0, 0x2C, 0x07])
-        ]
+    public static let bankInitialization: [MIDIMessage] = channelStripLights(on: false)
+
+    /// Selects each channel-strip zone and controls its observed HUI light port.
+    /// HUI represents the on-state by setting bit 6 on the selected port value.
+    public static func channelStripLights(on: Bool) -> [MIDIMessage] {
+        let lightPort: UInt8 = on ? 0x47 : 0x07
+        return (0..<8).flatMap { zone in
+            [
+                MIDIMessage([0xB0, 0x0C, UInt8(zone)]),
+                MIDIMessage([0xB0, 0x2C, lightPort])
+            ]
+        }
     }
 
     /// Encodes one bank-local fader position as the HUI MSB and LSB CC pair.

@@ -37,6 +37,18 @@ struct MIDIIngressEvent {
     let isNativeEthernet: Bool
 }
 
+enum HUIBridgeDAW: Equatable {
+    case logicPro
+    case proTools
+
+    var displayName: String {
+        switch self {
+        case .logicPro: return "Logic Pro"
+        case .proTools: return "Pro Tools"
+        }
+    }
+}
+
 final class CoreMIDIService {
     var onBytes: ((MIDIIngressEvent) -> Void)?
     var onTopologyChanged: (() -> Void)?
@@ -48,8 +60,9 @@ final class CoreMIDIService {
     private var inputPort = MIDIPortRef()
     private var outputPort = MIDIPortRef()
     private var dawVirtualSource = MIDIEndpointRef()
-    private var logicHUIVirtualSources: [Int: MIDIEndpointRef] = [:]
-    private var logicHUIVirtualDestinations: [Int: MIDIEndpointRef] = [:]
+    private var huiBridgeVirtualSources: [Int: MIDIEndpointRef] = [:]
+    private var huiBridgeVirtualDestinations: [Int: MIDIEndpointRef] = [:]
+    private var activeHUIBridgeDAW: HUIBridgeDAW?
     private var connectedSources: [Int: MIDIEndpointRef] = [:]
     private var destinations: [Int: MIDIEndpointRef] = [:]
     private var nativeBanks = Set<Int>()
@@ -142,8 +155,8 @@ final class CoreMIDIService {
         if dawVirtualSource != 0 {
             MIDIEndpointDispose(dawVirtualSource)
         }
-        for endpoint in logicHUIVirtualSources.values { MIDIEndpointDispose(endpoint) }
-        for endpoint in logicHUIVirtualDestinations.values { MIDIEndpointDispose(endpoint) }
+        for endpoint in huiBridgeVirtualSources.values { MIDIEndpointDispose(endpoint) }
+        for endpoint in huiBridgeVirtualDestinations.values { MIDIEndpointDispose(endpoint) }
         if client != 0 {
             MIDIClientDispose(client)
         }
@@ -157,70 +170,76 @@ final class CoreMIDIService {
         }
         transmissionLock.unlock()
         if !enabled {
-            deactivateLogicHUIBridge()
+            deactivateHUIBridge()
         }
     }
 
     func setDAWOutputEnabled(_ enabled: Bool) {
         transmissionLock.lock()
-        dawOutputEnabled = enabled && transmissionEnabled && dawVirtualSource != 0
+        dawOutputEnabled = enabled && transmissionEnabled
         transmissionLock.unlock()
         if !enabled {
-            deactivateLogicHUIBridge()
+            deactivateHUIBridge()
         }
     }
 
-    func activateLogicHUIBridge(banks: [Int]) -> Bool {
+    func activateHUIBridge(banks: [Int], daw: HUIBridgeDAW) -> Bool {
         guard client != 0 else { return false }
         let requestedBanks = Set(banks.filter { (0..<4).contains($0) })
         guard !requestedBanks.isEmpty else { return false }
-        if Set(logicHUIVirtualSources.keys) == requestedBanks,
-           Set(logicHUIVirtualDestinations.keys) == requestedBanks {
+        if activeHUIBridgeDAW == daw,
+           Set(huiBridgeVirtualSources.keys) == requestedBanks,
+           Set(huiBridgeVirtualDestinations.keys) == requestedBanks {
             return true
         }
-        deactivateLogicHUIBridge()
+        deactivateHUIBridge()
         suppressTopologyNotificationsUntil = ProcessInfo.processInfo.systemUptime + 1
 
         for bank in requestedBanks.sorted() {
             var source = MIDIEndpointRef()
             let sourceStatus = MIDISourceCreate(
                 client,
-                "SwiftMix Logic HUI Bank \(bank + 1) Output" as CFString,
+                "SwiftMix \(daw.displayName) HUI Bank \(bank + 1) Output" as CFString,
                 &source
             )
             guard sourceStatus == noErr else {
-                dawSetupError = "Could not create Logic HUI Bank \(bank + 1) output (OSStatus \(sourceStatus))."
-                deactivateLogicHUIBridge()
+                dawSetupError = "Could not create \(daw.displayName) HUI Bank \(bank + 1) output (OSStatus \(sourceStatus))."
+                deactivateHUIBridge()
                 return false
             }
-            logicHUIVirtualSources[bank] = source
+            huiBridgeVirtualSources[bank] = source
 
             var destination = MIDIEndpointRef()
             let destinationStatus = MIDIDestinationCreateWithBlock(
                 client,
-                "SwiftMix Logic HUI Bank \(bank + 1) Input" as CFString,
+                "SwiftMix \(daw.displayName) HUI Bank \(bank + 1) Input" as CFString,
                 &destination
             ) { [weak self] packetList, _ in
-                self?.receiveLogicHUI(packetList: packetList, bank: bank)
+                self?.receiveHUIBridge(packetList: packetList, bank: bank)
             }
             guard destinationStatus == noErr else {
-                dawSetupError = "Could not create Logic HUI Bank \(bank + 1) input (OSStatus \(destinationStatus))."
-                deactivateLogicHUIBridge()
+                dawSetupError = "Could not create \(daw.displayName) HUI Bank \(bank + 1) input (OSStatus \(destinationStatus))."
+                deactivateHUIBridge()
                 return false
             }
-            logicHUIVirtualDestinations[bank] = destination
+            huiBridgeVirtualDestinations[bank] = destination
         }
+        activeHUIBridgeDAW = daw
         dawSetupError = nil
         return true
     }
 
-    func deactivateLogicHUIBridge() {
-        guard !logicHUIVirtualSources.isEmpty || !logicHUIVirtualDestinations.isEmpty else { return }
+    func deactivateHUIBridge() {
+        guard !huiBridgeVirtualSources.isEmpty || !huiBridgeVirtualDestinations.isEmpty else {
+            activeHUIBridgeDAW = nil
+            return
+        }
         suppressTopologyNotificationsUntil = ProcessInfo.processInfo.systemUptime + 1
-        for endpoint in logicHUIVirtualSources.values { MIDIEndpointDispose(endpoint) }
-        for endpoint in logicHUIVirtualDestinations.values { MIDIEndpointDispose(endpoint) }
-        logicHUIVirtualSources.removeAll()
-        logicHUIVirtualDestinations.removeAll()
+        for endpoint in huiBridgeVirtualSources.values { MIDIEndpointDispose(endpoint) }
+        for endpoint in huiBridgeVirtualDestinations.values { MIDIEndpointDispose(endpoint) }
+        huiBridgeVirtualSources.removeAll()
+        huiBridgeVirtualDestinations.removeAll()
+        activeHUIBridgeDAW = nil
     }
 
     func configureNativeEthernet(interfaceBSDName: String?) {
@@ -439,19 +458,19 @@ final class CoreMIDIService {
     }
 
     @discardableResult
-    func sendHUIToLogic(_ bytes: [UInt8], bank: Int) -> OSStatus? {
+    func sendHUIToBridge(_ bytes: [UInt8], bank: Int) -> OSStatus? {
         transmissionLock.lock()
         defer { transmissionLock.unlock() }
         guard transmissionEnabled,
               dawOutputEnabled,
-              let source = logicHUIVirtualSources[bank],
+              let source = huiBridgeVirtualSources[bank],
               !bytes.isEmpty else {
             return nil
         }
         return sendVirtualPacket(bytes, to: source)
     }
 
-    private func receiveLogicHUI(
+    private func receiveHUIBridge(
         packetList: UnsafePointer<MIDIPacketList>,
         bank: Int
     ) {
