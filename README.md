@@ -1,8 +1,8 @@
-# SwiftMix Nominal Lock
+# SwiftMix-Revitalized
 
 A macOS menu-bar utility for controlling the motorized faders on the **Rupert Neve Designs SwiftMix** over a dedicated wired Ethernet connection.
 
-SwiftMix Nominal Lock provides native, interface-bound UDP/HUI communication for up to 32 faders. Its primary purpose is to hold the console’s faders at a physically verified nominal (`0 dB`) position without requiring a third-party ipMIDI driver. It also includes fader scenes, a commissioning exercise, and optional DAW takeover modes.
+SwiftMix Revitalized provides native, interface-bound UDP/HUI communication for up to 32 faders. Its primary purpose is to hold the console’s faders at a physically verified nominal (`0 dB`) position without requiring a third-party ipMIDI driver. It also includes fader scenes, a commissioning exercise, and optional DAW takeover modes.
 
 > [!CAUTION]
 > **This software can move motorized faders and change real analog audio levels.** Test only with console inputs, outputs, monitors, headphones, in-ear feeds, recording paths, and other affected signal paths muted or physically disconnected. Nominal Lock is software—not a hard safety interlock—and must not be the only protection for hearing, performers, equipment, or recordings.
