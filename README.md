@@ -22,11 +22,11 @@ The current working version supports:
 - Capture, storage, recall, and locking of 32-fader scenes
 - A destructive full-desk commissioning exercise
 - Generic MIDI and Ableton Live takeover profiles
-- A bidirectional Logic Pro HUI bridge using temporary CoreMIDI ports
+- Bidirectional Logic Pro and Pro Tools HUI bridges using temporary CoreMIDI ports
 - Launch at Login
 - Fail-closed transmission controls and an immediate “Disable All MIDI Transmission” action
 
-This remains a hardware-facing test project. Builds produced by the included packaging script are ad-hoc signed and are **not notarized for public distribution**.
+This is hardware-facing software. Release builds produced by the included packaging script are ad-hoc signed and are **not Apple-notarized**, so macOS requires explicit user approval before the first launch.
 
 ## Requirements
 
@@ -72,34 +72,34 @@ swift run SwiftMixNominal
 
 The application runs as a menu-bar accessory and does not create a Dock icon. Look for the vertical-slider icon in the menu bar.
 
-### Create a distributable test app
+### Create the v1.0.0 release app
 
 The packaging script builds a universal Apple Silicon/Intel app bundle, ad-hoc signs it, creates a ZIP archive, and writes a SHA-256 checksum:
 
 ```sh
-./Scripts/package-test-app.sh
+./Scripts/package-release-app.sh
 ```
 
 Generated artifacts are placed in `dist/`:
 
-- `Swiftmix-Revitalized-macOS-test.zip`
-- `Swiftmix-Revitalized-macOS-test.zip.sha256`
+- `Swiftmix-Revitalized-1.0.0-macOS.zip`
+- `Swiftmix-Revitalized-1.0.0-macOS.zip.sha256`
 
 On another Mac, verify the download before opening it:
 
 ```sh
-shasum -a 256 -c Swiftmix-Revitalized-macOS-test.zip.sha256
+shasum -a 256 -c Swiftmix-Revitalized-1.0.0-macOS.zip.sha256
 ```
 
-Because the test app is not Developer ID notarized, macOS may require you to Control-click the app, choose **Open**, and approve that specific app in **System Settings → Privacy & Security**. Do not use broad or recursive quarantine-removal commands.
+Because the release is not Developer ID notarized, macOS may require you to Control-click the app, choose **Open**, and approve that specific app in **System Settings → Privacy & Security**. Do not use broad or recursive quarantine-removal commands.
 
-See [`Packaging/TESTING.md`](Packaging/TESTING.md) for the test-build installation checklist.
+See [`Packaging/INSTALLATION.md`](Packaging/INSTALLATION.md) for the release installation checklist.
 
 ## First startup
 
 ### 1. Approve the app in Privacy & Security
 
-This test build is ad-hoc signed and is not notarized, so macOS may block its first launch.
+This release is ad-hoc signed and is not notarized, so macOS may block its first launch.
 
 1. Unzip the download and move `Swiftmix-Revitalized.app` into `/Applications`.
 2. Try to open the app once. If macOS blocks it, open **System Settings → Privacy & Security**.
@@ -318,7 +318,7 @@ Sources/
 └── SwiftMixNativeSineWave/ native UDP movement test
 Tests/
 └── SwiftMixCoreSelfTests/ executable self-test suite
-Packaging/                 app metadata, icon, and testing notes
+Packaging/                 app metadata, icon, and installation notes
 Scripts/                   packaging and hardware test scripts
 Experimental/              isolated transport experiments
 ```
@@ -329,11 +329,11 @@ Experimental/              isolated transport experiments
 - Physical movement must be verified visually; received MIDI may be echoed or otherwise fail to represent motor travel.
 - SwiftMix automation mode-button requests and mode LEDs are not managed.
 - Generic and Ableton takeover profiles are one-way and do not accept DAW playback automation back to the console.
-- Test packages are ad-hoc signed and not notarized.
+- Release packages are ad-hoc signed and not Apple-notarized.
 - Hardware behavior depends on the local network, console state, cabling, and host configuration.
 
 ## License and trademark notice
 
-No open-source license is currently included in this repository. Unless a license is added, the source is available for inspection but no general permission to copy, modify, or redistribute it is granted.
+This project is distributed under the BSD 2-Clause–style license in [`LICENSE`](LICENSE). It permits use, modification, and redistribution while requiring preservation of the copyright notice, license conditions, and disclaimer.
 
 SwiftMix and Rupert Neve Designs are trademarks of their respective owners. This project is an independent utility and is not presented as an official Rupert Neve Designs product.

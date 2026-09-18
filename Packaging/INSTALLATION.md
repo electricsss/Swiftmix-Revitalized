@@ -1,4 +1,4 @@
-# Swiftmix-Revitalized — second-Mac test build
+# Swiftmix-Revitalized 1.0.0 — installation guide
 
 ## Requirements
 
@@ -12,27 +12,27 @@
 
 Transfer both files from `dist/`:
 
-- `Swiftmix-Revitalized-macOS-test.zip`
-- `Swiftmix-Revitalized-macOS-test.zip.sha256`
+- `Swiftmix-Revitalized-1.0.0-macOS.zip`
+- `Swiftmix-Revitalized-1.0.0-macOS.zip.sha256`
 
 In Terminal on the receiving Mac, change to the folder containing them and run:
 
 ```sh
-shasum -a 256 -c Swiftmix-Revitalized-macOS-test.zip.sha256
+shasum -a 256 -c Swiftmix-Revitalized-1.0.0-macOS.zip.sha256
 ```
 
 The result must say `OK`.
 
-## Install an ad-hoc test build
+## Install the ad-hoc signed release
 
 1. Double-click the ZIP.
 2. Drag `Swiftmix-Revitalized.app` into `/Applications`.
-3. Because this test build is not Developer ID notarized, Control-click the app and choose **Open**, then confirm **Open**. If macOS still blocks it, open **System Settings → Privacy & Security** and approve this specific app.
+3. Because this release is not Developer ID notarized, Control-click the app and choose **Open**, then confirm **Open**. If macOS still blocks it, open **System Settings → Privacy & Security** and approve this specific app.
 4. Do not remove quarantine with a broad or recursive command. Approve only this app through Finder/System Settings.
 
 The app is a menu-bar utility and does not open a Dock window. Look for the vertical-slider icon in the menu bar.
 
-## First native Ethernet test
+## First native Ethernet setup
 
 1. Keep audio disconnected/isolated.
 2. Quit all DAWs and disable the third-party ipMIDI SwiftMix ports.
@@ -56,8 +56,8 @@ Transmit sockets use macOS-assigned ephemeral source ports. The sockets are boun
 
 ## Safety and limitations
 
-- This package is for controlled testing, not public distribution.
-- It is ad-hoc signed and not notarized.
+- This release is ad-hoc signed and is not Apple-notarized.
+- macOS requires explicit user approval before the first launch.
 - Launch at Login may require approval and should be tested only after normal launch succeeds.
 - Never run the app and a DAW/ipMIDI HUI host against the physical SwiftMix simultaneously.
 - Emergency Stop intentionally sends no restoration through an unverified connection.
