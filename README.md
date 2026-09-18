@@ -30,8 +30,8 @@ This remains a hardware-facing test project. Builds produced by the included pac
 
 ## Requirements
 
-- macOS 13 Ventura or newer
-- Apple Silicon or Intel Mac
+- macOS 15 Sequoia or macOS 26 Tahoe
+- Apple Silicon or a Mac model supported by the installed macOS release
 - Swift 5.9-compatible toolchain (Xcode Command Line Tools or Xcode)
 - Rupert Neve Designs SwiftMix
 - A dedicated wired Ethernet adapter connected to the SwiftMix
@@ -82,37 +82,121 @@ The packaging script builds a universal Apple Silicon/Intel app bundle, ad-hoc s
 
 Generated artifacts are placed in `dist/`:
 
-- `SwiftMix-Nominal-Lock-macOS-test.zip`
-- `SwiftMix-Nominal-Lock-macOS-test.zip.sha256`
+- `Swiftmix-Revitalized-macOS-test.zip`
+- `Swiftmix-Revitalized-macOS-test.zip.sha256`
 
 On another Mac, verify the download before opening it:
 
 ```sh
-shasum -a 256 -c SwiftMix-Nominal-Lock-macOS-test.zip.sha256
+shasum -a 256 -c Swiftmix-Revitalized-macOS-test.zip.sha256
 ```
 
 Because the test app is not Developer ID notarized, macOS may require you to Control-click the app, choose **Open**, and approve that specific app in **System Settings → Privacy & Security**. Do not use broad or recursive quarantine-removal commands.
 
 See [`Packaging/TESTING.md`](Packaging/TESTING.md) for the test-build installation checklist.
 
-## First-time setup
+## First startup
+
+### 1. Approve the app in Privacy & Security
+
+This test build is ad-hoc signed and is not notarized, so macOS may block its first launch.
+
+1. Unzip the download and move `Swiftmix-Revitalized.app` into `/Applications`.
+2. Try to open the app once. If macOS blocks it, open **System Settings → Privacy & Security**.
+3. Scroll to the **Security** section and find the message that `Swiftmix-Revitalized` was blocked.
+4. Click **Open Anyway**, authenticate if requested, and then confirm **Open**.
+5. Alternatively, Control-click `Swiftmix-Revitalized.app` in Finder, choose **Open**, and confirm the exception.
+6. Do not use broad or recursive quarantine-removal commands.
+
+The application is a menu-bar utility and does not open a Dock window. After launch, look for the vertical-slider icon in the menu bar and choose **Settings…**.
+
+### 2. Prepare the console and connection
 
 > [!WARNING]
-> Do not run this app and another HUI host against the physical SwiftMix at the same time. Quit Logic Pro, Pro Tools, and other control-surface hosts, and disable third-party ipMIDI ports assigned to these banks. Multiple hosts can fight over physical fader positions.
+> Do not run this app and another HUI host against the physical SwiftMix at the same time. Multiple hosts can fight over physical fader positions and change real analog levels.
 
-1. Isolate or physically disconnect all affected audio paths.
+1. Mute or physically disconnect console inputs, outputs, monitors, headphones, in-ear feeds, recording paths, and all other affected audio paths.
 2. Connect the SwiftMix to a dedicated wired Ethernet adapter.
-3. Quit DAWs and disable third-party ipMIDI SwiftMix ports.
-4. Launch SwiftMix Nominal Lock and open **Settings…** from the menu-bar icon.
-5. Select the exact wired **Ethernet service** connected to the SwiftMix.
-6. Click **Use Native Ethernet Ports**.
-7. Confirm the active banks use `SwiftMix Ethernet Port 1–4` for input and output.
-8. Choose the required channel count: 8, 16, 24, or 32.
-9. Enable outgoing HUI MIDI for the current session only after confirming the selected service and BSD interface are correct.
-10. Confirm every active bank reports recent HUI activity.
-11. Calibrate and physically verify the nominal value before arming Nominal Lock.
+3. Quit Logic Pro, Pro Tools, Ableton Live, and other control-surface hosts.
+4. Disable or remove third-party ipMIDI assignments for the SwiftMix banks. Native Ethernet mode does not require ipMIDI.
+5. Leave **Nominal Lock** disabled until calibration is complete.
 
-The menu-bar icon is bright only when Nominal Lock is verified and armed and every configured bank is online. Test and takeover modes intentionally leave it dim.
+### 3. Choose the Ethernet interface and refresh devices
+
+1. Open **Settings…** from the menu-bar icon.
+2. Under **SwiftMix Connection**, click **Rescan Interfaces**.
+3. In **Ethernet service**, select the exact wired macOS network service connected to the SwiftMix. Do not select Wi-Fi or an unrelated Ethernet adapter.
+4. Check the status line and confirm that it shows the expected BSD interface, such as `en5`, and that the service is active.
+5. Choose the number of connected channels: **8**, **16**, **24**, or **32**. Each group of eight channels enables another SwiftMix bank.
+6. Click **Use Native Ethernet Ports** to assign the app's native ports automatically.
+7. Click **Rescan** to refresh the available MIDI endpoints.
+8. Confirm that every active bank uses the corresponding `SwiftMix Ethernet Port 1–4` input and output.
+9. Click **Enable for This Session…**, review the warning, and choose **Enable HUI Transmission** only after confirming the interface and isolated signal path.
+10. Wait for every configured bank to report recent HUI activity. Do not calibrate, commission, or enable DAW Takeover while a required bank is offline.
+
+**Rescan Interfaces** refreshes macOS network services and adapters. **Rescan** refreshes MIDI endpoints and clears stale endpoint discovery state. If an adapter, cable, channel count, or MIDI configuration changes, run the appropriate rescan and verify every selection again.
+
+### 4. Confirm nominal and calibrate the level markers
+
+The app must learn the physical desk's printed fader positions. Do not assume the default raw value is correct for every SwiftMix.
+
+1. Keep all affected audio paths muted or disconnected and keep **Nominal Lock** disabled.
+2. Move one physical fader exactly to its printed **0 dB** mark.
+3. In **Nominal Calibration**, confirm that **Last received** shows that fader's channel and raw HUI value.
+4. Click **Use Last Received Value** to make that value the nominal candidate.
+5. Click **Test Candidate on Fader 1**, approve the warning, and visually confirm that fader 1 moves exactly to the printed `0 dB` mark.
+6. Click **Verify 0 dB and Arm Lock** only after the physical position has been confirmed. This sends the verified value to every configured fader.
+7. Disable **Nominal Lock** again before moving a fader by hand to calibrate the remaining markers.
+8. For each additional preset—**-5 dB**, **-10 dB**, **-15 dB**, and **-20 dB**—move a physical fader exactly to the corresponding printed mark and confirm the new **Last received** value.
+9. Click **Use Last Received** beside that specific marker. Repeat separately for every marker; do not reuse an assumed value or calculate one from another marker.
+10. Test the menu-bar **Set Faders to** choices while the signal path remains isolated, and visually confirm every calibrated position before reconnecting audio.
+
+The marker values are saved on the Mac. Uncalibrated markers remain unavailable in the **Set Faders to** menu. The menu-bar icon is bright only when Nominal Lock is verified and armed and all configured banks are online; commissioning and DAW Takeover intentionally leave it dim.
+
+### 5. Configure DAW control
+
+Complete interface selection, endpoint discovery, nominal verification, and bank connectivity before enabling DAW Takeover. DAW Takeover suspends Nominal Lock while active.
+
+1. Keep other HUI hosts and old ipMIDI SwiftMix assignments disabled while configuring the app.
+2. In **Settings → DAW Takeover**, choose a **DAW** profile and the required **Active fader banks**.
+3. For **Generic Linear** or **Ableton Live**, choose the MIDI channel and starting CC range before enabling takeover.
+4. Click **Enable DAW Takeover…**, review the safety warning, and select **Enable Selected DAW Mode**.
+5. Configure the DAW as described below. Ports created by a HUI Bridge exist only while takeover is active.
+6. When finished, use **Exit & Return All to Nominal** and visually confirm the desk before reconnecting audio. Use **Emergency: Stop All MIDI Now** only when an immediate stop is required; an emergency stop does not guarantee restoration to nominal.
+
+#### Generic Linear
+
+1. In the DAW, enable `SwiftMix DAW Takeover` as a MIDI input.
+2. Use MIDI Learn or the DAW's controller mapping to assign the adjacent fader CC messages.
+3. Faders 1–32 use the configured CC range and MIDI channel; touch states publish notes `36–67`.
+4. This profile is one-way: DAW playback automation does not drive the SwiftMix motors.
+
+#### Ableton Live
+
+1. In Live's MIDI settings, enable `SwiftMix DAW Takeover` as a track/remote input as required by the mapping workflow.
+2. Use MIDI Map Mode to assign the faders.
+3. The Ableton response curve maps SwiftMix nominal raw value `12320` to Ableton's `0 dB` CC value `108`.
+4. This profile is one-way and does not return Live automation to the console.
+
+#### Logic Pro HUI Bridge
+
+For each active bank, add one HUI control surface in Logic and configure:
+
+- Logic input: `SwiftMix Logic Pro HUI Bank N Output`
+- Logic output: `SwiftMix Logic Pro HUI Bank N Input`
+
+Use the matching bank number on both sides. Remove old ipMIDI HUI assignments before enabling the bridge.
+
+#### Pro Tools HUI Bridge
+
+In **Pro Tools → Setup → Peripherals → MIDI Controllers**, add one HUI peripheral for each active bank:
+
+- Type: **HUI**
+- Channels: **8**
+- Receive From: `SwiftMix Pro Tools HUI Bank N Output`
+- Send To: `SwiftMix Pro Tools HUI Bank N Input`
+
+Use the matching bank number for each peripheral. The Logic and Pro Tools bridges are bidirectional and pass raw HUI between the DAW and the selected native SwiftMix Ethernet banks.
 
 ## Nominal calibration and lock
 
@@ -174,8 +258,8 @@ Creates temporary bidirectional HUI endpoint pairs for the selected bank or bank
 
 For each active bank, configure one Logic HUI device:
 
-- Logic input: `Bank N Output`
-- Logic output: `Bank N Input`
+- Logic input: `SwiftMix Logic Pro HUI Bank N Output`
+- Logic output: `SwiftMix Logic Pro HUI Bank N Input`
 
 The virtual ports exist only while takeover is active and are disposed when takeover stops. Remove old ipMIDI HUI assignments before using this mode.
 

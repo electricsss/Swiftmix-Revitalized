@@ -3,14 +3,14 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname -- "$SCRIPT_DIR")
-APP_NAME="SwiftMix Nominal Lock"
+APP_NAME="Swiftmix-Revitalized"
 BUNDLE_NAME="$APP_NAME.app"
 DIST_DIR="$PROJECT_DIR/dist"
 STAGE_DIR="$PROJECT_DIR/.build/package-stage"
 ARM_BUILD="$PROJECT_DIR/.build/package-arm64"
 X86_BUILD="$PROJECT_DIR/.build/package-x86_64"
 APP_DIR="$STAGE_DIR/$BUNDLE_NAME"
-ZIP_PATH="$DIST_DIR/SwiftMix-Nominal-Lock-macOS-test.zip"
+ZIP_PATH="$DIST_DIR/Swiftmix-Revitalized-macOS-test.zip"
 
 rm -rf "$STAGE_DIR" "$ARM_BUILD" "$X86_BUILD"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$DIST_DIR"
@@ -37,6 +37,7 @@ fi
 chmod 755 "$APP_DIR/Contents/MacOS/SwiftMixNominal"
 cp "$PROJECT_DIR/Packaging/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$PROJECT_DIR/Packaging/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+cp "$PROJECT_DIR/LICENSE" "$APP_DIR/Contents/Resources/LICENSE"
 /usr/bin/plutil -lint "$APP_DIR/Contents/Info.plist"
 
 /usr/bin/codesign --force --deep --sign - --identifier com.electric.swiftmix-nominal "$APP_DIR"

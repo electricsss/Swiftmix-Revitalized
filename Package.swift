@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "SwiftMixNominal",
     platforms: [
-        .macOS(.v13)
+        .macOS("15.0")
     ],
     products: [
         .library(name: "SwiftMixCore", targets: ["SwiftMixCore"]),

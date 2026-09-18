@@ -1,9 +1,9 @@
-# SwiftMix Nominal Lock — second-Mac test build
+# Swiftmix-Revitalized — second-Mac test build
 
 ## Requirements
 
-- macOS 13 or newer.
-- Apple Silicon or Intel Mac.
+- macOS 15 Sequoia or macOS 26 Tahoe.
+- Apple Silicon or a Mac model supported by the installed macOS release.
 - A dedicated wired Ethernet adapter connected to the SwiftMix.
 - Audio paths physically isolated for the first test.
 - Logic Pro, Pro Tools, ipMIDI, and other HUI hosts stopped during native transport testing.
@@ -12,13 +12,13 @@
 
 Transfer both files from `dist/`:
 
-- `SwiftMix-Nominal-Lock-macOS-test.zip`
-- `SwiftMix-Nominal-Lock-macOS-test.zip.sha256`
+- `Swiftmix-Revitalized-macOS-test.zip`
+- `Swiftmix-Revitalized-macOS-test.zip.sha256`
 
 In Terminal on the receiving Mac, change to the folder containing them and run:
 
 ```sh
-shasum -a 256 -c SwiftMix-Nominal-Lock-macOS-test.zip.sha256
+shasum -a 256 -c Swiftmix-Revitalized-macOS-test.zip.sha256
 ```
 
 The result must say `OK`.
@@ -26,7 +26,7 @@ The result must say `OK`.
 ## Install an ad-hoc test build
 
 1. Double-click the ZIP.
-2. Drag `SwiftMix Nominal Lock.app` into `/Applications`.
+2. Drag `Swiftmix-Revitalized.app` into `/Applications`.
 3. Because this test build is not Developer ID notarized, Control-click the app and choose **Open**, then confirm **Open**. If macOS still blocks it, open **System Settings → Privacy & Security** and approve this specific app.
 4. Do not remove quarantine with a broad or recursive command. Approve only this app through Finder/System Settings.
 
