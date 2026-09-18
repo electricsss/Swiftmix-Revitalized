@@ -72,6 +72,7 @@ final class CoreMIDIService {
     private let transmissionLock = NSLock()
     private var transmissionEnabled = false
     private var dawOutputEnabled = false
+    private var transmissionSuspendedBanks = Set<Int>()
     private var suppressTopologyNotificationsUntil = -Double.infinity
 
     init() {
@@ -167,11 +168,24 @@ final class CoreMIDIService {
         transmissionEnabled = enabled
         if !enabled {
             dawOutputEnabled = false
+            transmissionSuspendedBanks.removeAll()
         }
         transmissionLock.unlock()
         if !enabled {
             deactivateHUIBridge()
         }
+    }
+
+    func setTransmissionSuspended(_ suspended: Bool, banks: [Int]) {
+        transmissionLock.lock()
+        for bank in banks where (0..<4).contains(bank) {
+            if suspended {
+                transmissionSuspendedBanks.insert(bank)
+            } else {
+                transmissionSuspendedBanks.remove(bank)
+            }
+        }
+        transmissionLock.unlock()
     }
 
     func setDAWOutputEnabled(_ enabled: Bool) {
@@ -374,7 +388,9 @@ final class CoreMIDIService {
         defer { transmissionLock.unlock() }
 
         let payload = messages.flatMap { $0 }
-        guard transmissionEnabled, !payload.isEmpty else { return nil }
+        guard transmissionEnabled,
+              !transmissionSuspendedBanks.contains(bank),
+              !payload.isEmpty else { return nil }
 
         if nativeBanks.contains(bank), let nativeTransport,
            let nativeBank = try? IPMIDIBank(number: bank + 1) {

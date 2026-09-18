@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import CoreMIDI
 import Foundation
@@ -27,6 +28,20 @@ struct StoredFaderScene: Identifiable, Codable, Equatable {
     var name: String
     let positions: [Int]
     let createdAt: Date
+}
+
+enum FaderLevelPreset: Int, CaseIterable, Identifiable {
+    case zero = 0
+    case minus5 = -5
+    case minus10 = -10
+    case minus15 = -15
+    case minus20 = -20
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        rawValue == 0 ? "0 dB" : "\(rawValue) dB"
+    }
 }
 
 struct ObservedFader: Equatable {
@@ -59,6 +74,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var scenes: [StoredFaderScene]
     @Published private(set) var activeSceneID: UUID?
     @Published private(set) var sceneCaptureEnabled = false
+    @Published private(set) var calibratedFaderLevels: [Int: Int]
+    @Published private(set) var activeFaderLevel: FaderLevelPreset?
 
     @Published private(set) var channelCount: Int
     @Published private(set) var nominalValue: Int
@@ -73,6 +90,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var dawControllerBase: Int
     @Published private(set) var dawTakeoverProfile: DAWTakeoverProfile
     @Published private(set) var dawBankSelection: DAWBankSelection
+    @Published private(set) var dawCloseGraceSecondsRemaining: Int?
+    @Published private(set) var dawFadersResting = false
+    @Published private(set) var dawCloseOverrideActive = false
     @Published private(set) var localEchoDetected = false
     @Published private(set) var commissioningPhase: CommissioningSequencePhase = .idle
     @Published private(set) var commissioningCompletedChannels = 0
@@ -96,6 +116,7 @@ final class AppModel: ObservableObject {
         static let dawBankSelection = "dawBankSelection"
         static let legacyLogicHUIBankSelection = "logicHUIBankSelection"
         static let scenes = "storedFaderScenes"
+        static let calibratedFaderLevels = "calibratedFaderLevels"
     }
 
     private let defaults: UserDefaults
@@ -103,7 +124,10 @@ final class AppModel: ObservableObject {
     private let ethernetMonitor: EthernetNetworkServiceMonitor
     private var streamParsers = Array(repeating: MIDIMessageStreamParser(), count: 4)
     private var huiParsers = Array(repeating: HUIFaderParser(), count: 4)
+    private var bankLastActivityUptimes = Array<TimeInterval?>(repeating: nil, count: 4)
     private var keepaliveTask: Task<Void, Never>?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var dawCloseDeadlineUptime: TimeInterval?
     private enum DeskExerciseStage {
         case maximum
         case low
@@ -138,6 +162,7 @@ final class AppModel: ObservableObject {
     private static let deskExerciseLowValue = 300
     private static let vegasDuration: TimeInterval = 60
     private static let vegasLightInterval: TimeInterval = 0.25
+    private static let dawCloseGraceDuration: TimeInterval = 15
 
     private var lastReassertionUptime = -Double.infinity
     private var lastDirectEthernetValidationUptime = -Double.infinity
@@ -218,6 +243,7 @@ final class AppModel: ObservableObject {
         let savedDAWBankSelection = defaults.string(forKey: DefaultsKey.dawBankSelection)
             ?? defaults.string(forKey: DefaultsKey.legacyLogicHUIBankSelection)
         dawBankSelection = savedDAWBankSelection.flatMap(DAWBankSelection.init(rawValue:)) ?? .all
+        dawCloseGraceSecondsRemaining = nil
         if let sceneData = defaults.data(forKey: DefaultsKey.scenes),
            let decodedScenes = try? JSONDecoder().decode([StoredFaderScene].self, from: sceneData) {
             scenes = decodedScenes.filter { scene in
@@ -230,6 +256,18 @@ final class AppModel: ObservableObject {
             scenes = []
         }
         activeSceneID = nil
+        activeFaderLevel = nil
+        let savedFaderLevels = defaults.dictionary(forKey: DefaultsKey.calibratedFaderLevels)
+            as? [String: Int] ?? [:]
+        calibratedFaderLevels = Dictionary(uniqueKeysWithValues: savedFaderLevels.compactMap { key, value in
+            guard let decibels = Int(key),
+                  FaderLevelPreset(rawValue: decibels) != nil,
+                  decibels != 0,
+                  (HUI.minimumFaderValue...HUI.maximumFaderValue).contains(value) else {
+                return nil
+            }
+            return (decibels, value)
+        })
         runtimeStates = (0..<4).map { BankRuntimeState(bank: $0) }
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
 
@@ -277,6 +315,10 @@ final class AppModel: ObservableObject {
         keepaliveTask?.cancel()
         commissioningTask?.cancel()
         refreshWorkItem?.cancel()
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers {
+            notificationCenter.removeObserver(observer)
+        }
     }
 
     var activeBankCount: Int {
@@ -406,6 +448,15 @@ final class AppModel: ObservableObject {
             return "Scene capture unlocked — move faders, then name and save the scene"
         }
         if dawTakeoverEnabled {
+            if dawFadersResting {
+                return "DAW closed — selected SwiftMix banks are resting with transmission suspended"
+            }
+            if let seconds = dawCloseGraceSecondsRemaining {
+                return "DAW closed — SwiftMix banks will rest in \(seconds) seconds unless overridden"
+            }
+            if dawCloseOverrideActive {
+                return "DAW closed — engineer override is keeping the HUI bridge active"
+            }
             switch dawTakeoverProfile {
             case .logicProHUI:
                 return "Logic Pro HUI Bridge active: \(dawBankSelection.displayName)"
@@ -441,6 +492,9 @@ final class AppModel: ObservableObject {
         if let activeScene {
             return "Scene Lock active: \(activeScene.name)"
         }
+        if let activeFaderLevel, activeFaderLevel != .zero {
+            return "Fader level lock active at \(activeFaderLevel.displayName) on all \(channelCount) channels"
+        }
         return "Nominal Lock active on all \(channelCount) channels"
     }
 
@@ -458,6 +512,18 @@ final class AppModel: ObservableObject {
             }
             return "Not running."
         }
+    }
+
+    var canSetFaderLevel: Bool {
+        transmissionEnabled
+            && nominalVerified
+            && !localEchoDetected
+            && !isCommissioningActive
+            && !dawTakeoverEnabled
+            && !sceneCaptureEnabled
+            && allActiveBanksOnline
+            && activeRoutesAreDistinct
+            && runtimeStates.prefix(activeBankCount).allSatisfy { $0.destinationConnected }
     }
 
     var canApplyNominal: Bool {
@@ -492,7 +558,7 @@ final class AppModel: ObservableObject {
               bank.destinationConnected else {
             return "Bank 1 requires both MIDI input and output endpoints."
         }
-        guard let lastActivity = bank.lastActivityUptime,
+        guard let lastActivity = bankLastActivityUptimes[0],
               ProcessInfo.processInfo.systemUptime - lastActivity
                 < Self.candidateTestActivityTimeout else {
             return "Move or touch a fader in Bank 1 (channels 1–8), then start the test within 15 seconds."
@@ -616,6 +682,7 @@ final class AppModel: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        installDAWLifecycleObservers()
 
         refreshEthernetServices(enforceSafetyInterlock: true)
         refreshEndpointsAndReconnect(ethernetAlreadyValidated: true)
@@ -626,6 +693,90 @@ final class AppModel: ObservableObject {
                 self?.keepaliveTick()
             }
         }
+    }
+
+    private func installDAWLifecycleObservers() {
+        guard workspaceObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(center.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication else { return }
+            Task { @MainActor in
+                self?.handleDAWTerminated(application)
+            }
+        })
+        workspaceObservers.append(center.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication else { return }
+            Task { @MainActor in
+                self?.handleDAWLaunched(application)
+            }
+        })
+    }
+
+    private func applicationMatchesSelectedDAW(_ application: NSRunningApplication) -> Bool {
+        let bundleIdentifier = application.bundleIdentifier?.lowercased() ?? ""
+        let name = application.localizedName?.lowercased() ?? ""
+        switch dawTakeoverProfile {
+        case .logicProHUI:
+            return bundleIdentifier == "com.apple.logic10" || name == "logic pro"
+        case .proToolsHUI:
+            return bundleIdentifier == "com.avid.protools" || name == "pro tools"
+        case .abletonLive:
+            return bundleIdentifier.hasPrefix("com.ableton.live") || name.hasPrefix("ableton live")
+        case .genericLinear:
+            return false
+        }
+    }
+
+    private func handleDAWTerminated(_ application: NSRunningApplication) {
+        guard dawTakeoverEnabled,
+              dawTakeoverProfile.usesBidirectionalHUIBridge,
+              applicationMatchesSelectedDAW(application) else { return }
+        dawCloseOverrideActive = false
+        dawFadersResting = false
+        dawCloseGraceSecondsRemaining = Int(Self.dawCloseGraceDuration)
+        dawCloseDeadlineUptime = ProcessInfo.processInfo.systemUptime
+            + Self.dawCloseGraceDuration
+    }
+
+    private func handleDAWLaunched(_ application: NSRunningApplication) {
+        guard dawTakeoverEnabled,
+              applicationMatchesSelectedDAW(application) else { return }
+        midi.setTransmissionSuspended(false, banks: dawBankSelection.bankIndices)
+        dawCloseDeadlineUptime = nil
+        dawCloseGraceSecondsRemaining = nil
+        dawFadersResting = false
+        dawCloseOverrideActive = false
+        lastIssue = nil
+    }
+
+    func overrideDAWCloseRest() {
+        guard dawTakeoverEnabled, dawCloseGraceSecondsRemaining != nil else { return }
+        midi.setTransmissionSuspended(false, banks: dawBankSelection.bankIndices)
+        dawCloseDeadlineUptime = nil
+        dawCloseGraceSecondsRemaining = nil
+        dawFadersResting = false
+        dawCloseOverrideActive = true
+        lastIssue = nil
+    }
+
+    private func clearDAWCloseState(resumeTransmission: Bool) {
+        if resumeTransmission {
+            midi.setTransmissionSuspended(false, banks: dawBankSelection.bankIndices)
+        }
+        dawCloseDeadlineUptime = nil
+        dawCloseGraceSecondsRemaining = nil
+        dawFadersResting = false
+        dawCloseOverrideActive = false
     }
 
     func enableHUITransmissionForSession() {
@@ -654,6 +805,7 @@ final class AppModel: ObservableObject {
         midi.setTransmissionEnabled(false)
         transmissionEnabled = false
         dawTakeoverEnabled = false
+        clearDAWCloseState(resumeTransmission: false)
         automaticTransmissionAuthorized = false
         defaults.set(false, forKey: DefaultsKey.automaticTransmissionAuthorized)
         cancelCommissioningWithoutRestoration()
@@ -661,6 +813,7 @@ final class AppModel: ObservableObject {
         sceneCapturePositions = nil
 
         for bank in runtimeStates.indices {
+            bankLastActivityUptimes[bank] = nil
             runtimeStates[bank].online = false
             runtimeStates[bank].lastActivityUptime = nil
         }
@@ -711,8 +864,10 @@ final class AppModel: ObservableObject {
                 return
             }
         }
+        midi.setTransmissionSuspended(false, banks: dawBankSelection.bankIndices)
         midi.setDAWOutputEnabled(true)
         dawTakeoverEnabled = true
+        clearDAWCloseState(resumeTransmission: true)
         lastIssue = nil
     }
 
@@ -720,6 +875,7 @@ final class AppModel: ObservableObject {
         guard dawTakeoverEnabled else { return }
 
         let banksToRestore = dawBankSelection.bankIndices
+        clearDAWCloseState(resumeTransmission: true)
         midi.setDAWOutputEnabled(false)
         dawTakeoverEnabled = false
         let restoredNominal = restoreBanksToNominal(banksToRestore)
@@ -797,6 +953,7 @@ final class AppModel: ObservableObject {
         nominalLockEnabled = false
         defaults.set(false, forKey: DefaultsKey.lockEnabled)
         activeSceneID = nil
+        activeFaderLevel = nil
         sceneCapturePositions = commandedBankValues.flatMap { $0 }
         sceneCaptureEnabled = true
         lastIssue = "Scene capture is unlocked. Move the desired faders, enter a name, then save the scene."
@@ -846,6 +1003,7 @@ final class AppModel: ObservableObject {
             }
         }
         activeSceneID = scene.id
+        activeFaderLevel = nil
         nominalLockEnabled = true
         defaults.set(true, forKey: DefaultsKey.lockEnabled)
         lastReassertionUptime = ProcessInfo.processInfo.systemUptime
@@ -873,6 +1031,8 @@ final class AppModel: ObservableObject {
             activeSceneID = nil
             sceneCaptureEnabled = false
             sceneCapturePositions = nil
+        } else {
+            activeFaderLevel = nil
         }
         defaults.set(enabled, forKey: DefaultsKey.lockEnabled)
 
@@ -890,6 +1050,7 @@ final class AppModel: ObservableObject {
         nominalVerified = true
         nominalLockEnabled = true
         activeSceneID = nil
+        activeFaderLevel = .zero
         defaults.set(true, forKey: DefaultsKey.nominalVerified)
         defaults.set(true, forKey: DefaultsKey.lockEnabled)
         applyNominalToAllFaders()
@@ -907,6 +1068,60 @@ final class AppModel: ObservableObject {
     func useLastObservedAsNominal() {
         guard let lastObservedFader else { return }
         setNominalValue(lastObservedFader.value)
+    }
+
+    func rawValue(for preset: FaderLevelPreset) -> Int? {
+        preset == .zero ? nominalValue : calibratedFaderLevels[preset.rawValue]
+    }
+
+    func setCalibratedFaderLevel(_ preset: FaderLevelPreset, rawValue: Int?) {
+        guard preset != .zero, !hasUnsafeActiveMode else { return }
+        if let rawValue {
+            guard (HUI.minimumFaderValue...HUI.maximumFaderValue).contains(rawValue) else {
+                lastIssue = "Raw HUI values must be between \(HUI.minimumFaderValue) and \(HUI.maximumFaderValue)."
+                return
+            }
+            calibratedFaderLevels[preset.rawValue] = rawValue
+        } else {
+            calibratedFaderLevels.removeValue(forKey: preset.rawValue)
+        }
+        let stored = Dictionary(uniqueKeysWithValues: calibratedFaderLevels.map {
+            (String($0.key), $0.value)
+        })
+        defaults.set(stored, forKey: DefaultsKey.calibratedFaderLevels)
+    }
+
+    func applyFaderLevel(_ preset: FaderLevelPreset) {
+        guard let value = rawValue(for: preset) else {
+            lastIssue = "Calibrate the \(preset.displayName) raw HUI value in Settings before using this preset."
+            return
+        }
+        guard canSetFaderLevel else {
+            lastIssue = "Fader presets require verified calibration, enabled transmission, and all configured banks online and idle."
+            return
+        }
+
+        activeSceneID = nil
+        sceneCaptureEnabled = false
+        sceneCapturePositions = nil
+        nominalLockEnabled = true
+        defaults.set(true, forKey: DefaultsKey.lockEnabled)
+
+        var sentAllBanks = true
+        for bank in 0..<activeBankCount {
+            commandedBankValues[bank] = Array(repeating: value, count: 8)
+            if !sendBankSnapshot(bank: bank) {
+                sentAllBanks = false
+                break
+            }
+        }
+        if sentAllBanks {
+            activeFaderLevel = preset
+            lastReassertionUptime = ProcessInfo.processInfo.systemUptime
+            lastIssue = nil
+        } else if transmissionEnabled {
+            lastIssue = "The \(preset.displayName) preset could not be sent to every configured bank."
+        }
     }
 
     /// Explicit calibration action. This can affect the analog level on channel 1.
@@ -931,6 +1146,7 @@ final class AppModel: ObservableObject {
         }
 
         if restoreAllActiveFadersToNominal() {
+            activeFaderLevel = .zero
             lastIssue = nil
         } else if lastIssue == nil {
             lastIssue = "Nominal could not be sent to every configured bank."
@@ -1156,7 +1372,10 @@ final class AppModel: ObservableObject {
     /// must then require a new explicit action.
     @discardableResult
     private func refreshEthernetServices(enforceSafetyInterlock: Bool) -> Bool {
-        ethernetServices = ethernetMonitor.services()
+        let refreshedServices = ethernetMonitor.services()
+        if refreshedServices != ethernetServices {
+            ethernetServices = refreshedServices
+        }
 
         guard let selectedEthernetServiceID else { return true }
         guard let currentService = ethernetServices.first(where: {
@@ -1290,6 +1509,7 @@ final class AppModel: ObservableObject {
         midi.setTransmissionEnabled(false)
         transmissionEnabled = false
         dawTakeoverEnabled = false
+        clearDAWCloseState(resumeTransmission: false)
         cancelCommissioningWithoutRestoration()
         recentFaderCommands.removeAll()
         markAllRuntimeBanksOffline()
@@ -1304,6 +1524,7 @@ final class AppModel: ObservableObject {
         midi.setTransmissionEnabled(false)
         transmissionEnabled = false
         dawTakeoverEnabled = false
+        clearDAWCloseState(resumeTransmission: false)
         cancelCommissioningWithoutRestoration()
         recentFaderCommands.removeAll()
         markAllRuntimeBanksOffline()
@@ -1318,6 +1539,7 @@ final class AppModel: ObservableObject {
         sceneCaptureEnabled = false
         sceneCapturePositions = nil
         for bank in runtimeStates.indices {
+            bankLastActivityUptimes[bank] = nil
             runtimeStates[bank].online = false
             runtimeStates[bank].lastActivityUptime = nil
         }
@@ -1348,6 +1570,7 @@ final class AppModel: ObservableObject {
         } else if dawTakeoverEnabled {
             midi.setDAWOutputEnabled(false)
             dawTakeoverEnabled = false
+            clearDAWCloseState(resumeTransmission: false)
             lastIssue = "CoreMIDI topology changed during DAW Takeover. Takeover stopped without sending restoration through a possibly stale route; keep audio disconnected and inspect the faders."
         }
         scheduleEndpointRefresh()
@@ -1370,6 +1593,7 @@ final class AppModel: ObservableObject {
         midi.configureNativeEthernet(interfaceBSDName: selectedEthernetBSDName)
         let snapshot = midi.endpointSnapshot()
         touchedChannels.removeAll()
+        bankLastActivityUptimes = Array(repeating: nil, count: 4)
         sources = snapshot.sources
         destinations = snapshot.destinations
 
@@ -1596,8 +1820,11 @@ final class AppModel: ObservableObject {
     }
 
     private func recordHUIActivity(bank: Int, receivedUptime: TimeInterval) {
-        runtimeStates[bank].lastActivityUptime = receivedUptime
-        runtimeStates[bank].online = true
+        bankLastActivityUptimes[bank] = receivedUptime
+        if !runtimeStates[bank].online {
+            runtimeStates[bank].lastActivityUptime = receivedUptime
+            runtimeStates[bank].online = true
+        }
     }
 
     private func processCommissioningReport(
@@ -1814,11 +2041,27 @@ final class AppModel: ObservableObject {
     private func keepaliveTick() {
         let now = ProcessInfo.processInfo.systemUptime
 
+        if let deadline = dawCloseDeadlineUptime {
+            let remaining = max(0, Int(ceil(deadline - now)))
+            if remaining == 0 {
+                midi.setTransmissionSuspended(true, banks: dawBankSelection.bankIndices)
+                dawCloseDeadlineUptime = nil
+                dawCloseGraceSecondsRemaining = nil
+                dawFadersResting = true
+                dawCloseOverrideActive = false
+            } else if dawCloseGraceSecondsRemaining != remaining {
+                dawCloseGraceSecondsRemaining = remaining
+            }
+        }
+
         if transmissionEnabled {
             guard refreshEthernetServices(enforceSafetyInterlock: true),
                   transmissionEnabled else { return }
 
             for bank in 0..<activeBankCount where runtimeStates[bank].destinationConnected {
+                if dawFadersResting && dawBankSelection.bankIndices.contains(bank) {
+                    continue
+                }
                 guard enforceEthernetSafetyBeforeSend() else { return }
                 let status = midi.send(HUI.pingRequest.bytes, toBank: bank)
                 if let status, status != noErr {
@@ -1828,10 +2071,12 @@ final class AppModel: ObservableObject {
         }
 
         for bank in 0..<activeBankCount {
-            if let lastActivity = runtimeStates[bank].lastActivityUptime {
-                runtimeStates[bank].online = now - lastActivity < Self.huiActivityTimeout
-            } else {
-                runtimeStates[bank].online = false
+            let isOnline = bankLastActivityUptimes[bank].map {
+                now - $0 < Self.huiActivityTimeout
+            } ?? false
+            if runtimeStates[bank].online != isOnline {
+                runtimeStates[bank].online = isOnline
+                runtimeStates[bank].lastActivityUptime = bankLastActivityUptimes[bank]
             }
         }
 
@@ -1843,9 +2088,10 @@ final class AppModel: ObservableObject {
             return
         }
 
-        if dawTakeoverEnabled, !allActiveBanksOnline {
+        if dawTakeoverEnabled, !dawFadersResting, !allActiveBanksOnline {
             midi.setDAWOutputEnabled(false)
             dawTakeoverEnabled = false
+            clearDAWCloseState(resumeTransmission: false)
             lastIssue = "A HUI bank stopped sending valid activity, so DAW Takeover was stopped. No restoration was sent through the unverified connection; inspect the desk."
             return
         }
@@ -1959,6 +2205,7 @@ final class AppModel: ObservableObject {
         guard transmissionEnabled, nominalVerified, !banks.isEmpty else { return false }
 
         activeSceneID = nil
+        activeFaderLevel = .zero
         sceneCaptureEnabled = false
         sceneCapturePositions = nil
         var allMessagesSent = true
@@ -2048,7 +2295,9 @@ final class AppModel: ObservableObject {
         midi.setTransmissionEnabled(false)
         transmissionEnabled = false
         dawTakeoverEnabled = false
+        clearDAWCloseState(resumeTransmission: false)
         for bank in runtimeStates.indices {
+            bankLastActivityUptimes[bank] = nil
             runtimeStates[bank].online = false
             runtimeStates[bank].lastActivityUptime = nil
         }
@@ -2076,6 +2325,9 @@ final class AppModel: ObservableObject {
     private func lockTarget(for channel: Int) -> Int {
         if let activeScene, activeScene.positions.indices.contains(channel) {
             return activeScene.positions[channel]
+        }
+        if let activeFaderLevel, let value = rawValue(for: activeFaderLevel) {
+            return value
         }
         return nominalValue
     }

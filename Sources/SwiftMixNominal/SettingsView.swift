@@ -268,6 +268,55 @@ struct SettingsView: View {
                 Text("For capture calibration, disable Nominal Lock, place one physical fader exactly at its printed 0 dB mark, then use the last received value above. The SwiftMix MODE switch changes automation mode through its HUI host, and this app does not yet interpret mode-button requests or drive the mode LEDs. Re-enable the lock only after the studio signal path is safe.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+
+                Divider()
+
+                Text("Set Faders To Presets")
+                    .font(.headline)
+                Text("Calibrate each printed level once. These raw HUI values are saved on this Mac and used by the menu-bar “Set Faders to” dropdown. Uncalibrated levels remain unavailable.")
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("0 dB")
+                    Spacer()
+                    Text("Raw \(model.nominalValue) (nominal calibration)")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                ForEach(FaderLevelPreset.allCases.filter { $0 != .zero }) { preset in
+                    HStack {
+                        Text(preset.displayName)
+                            .frame(width: 55, alignment: .leading)
+                        Spacer()
+                        TextField(
+                            "Not calibrated",
+                            text: Binding(
+                                get: {
+                                    model.rawValue(for: preset).map(String.init) ?? ""
+                                },
+                                set: { text in
+                                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    if trimmed.isEmpty {
+                                        model.setCalibratedFaderLevel(preset, rawValue: nil)
+                                    } else if let value = Int(trimmed) {
+                                        model.setCalibratedFaderLevel(preset, rawValue: value)
+                                    }
+                                }
+                            )
+                        )
+                        .frame(width: 120)
+                        .multilineTextAlignment(.trailing)
+
+                        Button("Use Last Received") {
+                            model.setCalibratedFaderLevel(
+                                preset,
+                                rawValue: model.lastObservedFader?.value
+                            )
+                        }
+                        .disabled(model.lastObservedFader == nil || model.hasUnsafeActiveMode)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -412,14 +461,33 @@ struct SettingsView: View {
                 }
 
                 if model.dawTakeoverEnabled {
-                    HStack {
-                        Button("Exit & Return All to Nominal") {
-                            model.stopDAWTakeoverAndRestoreNominal()
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let seconds = model.dawCloseGraceSecondsRemaining {
+                            HStack {
+                                Text("DAW closed. SwiftMix transmission will pause in \(seconds) seconds.")
+                                    .foregroundStyle(.orange)
+                                Spacer()
+                                Button("Engineer Override — Keep Active") {
+                                    model.overrideDAWCloseRest()
+                                }
+                            }
+                        } else if model.dawFadersResting {
+                            Text("The DAW is closed. Transmission to the selected banks is suspended so the faders can rest. Relaunching the selected DAW wakes them automatically.")
+                                .foregroundStyle(.secondary)
+                        } else if model.dawCloseOverrideActive {
+                            Text("Engineer override is active. The HUI bridge and fader transmission remain active even though the DAW closed.")
+                                .foregroundStyle(.orange)
                         }
-                        .buttonStyle(.borderedProminent)
 
-                        Button("Emergency: Stop All MIDI Now", role: .destructive) {
-                            model.disableAllMIDITransmission()
+                        HStack {
+                            Button("Exit & Return All to Nominal") {
+                                model.stopDAWTakeoverAndRestoreNominal()
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button("Emergency: Stop All MIDI Now", role: .destructive) {
+                                model.disableAllMIDITransmission()
+                            }
                         }
                     }
                 } else {
