@@ -187,6 +187,8 @@ For each active bank, add one HUI control surface in Logic and configure:
 
 Use the matching bank number on both sides. Remove old ipMIDI HUI assignments before enabling the bridge.
 
+This mode carries the original bidirectional HUI control data rather than translating the faders to generic MIDI CC messages. Logic's normal HUI fader assignments, touch handling, motor feedback, automation behavior, and other controls supported by the original SwiftMix/Logic design therefore apply while the bridge is active. Any Logic-specific HUI limitations still apply.
+
 #### Pro Tools HUI Bridge
 
 In **Pro Tools → Setup → Peripherals → MIDI Controllers**, add one HUI peripheral for each active bank:
@@ -196,7 +198,9 @@ In **Pro Tools → Setup → Peripherals → MIDI Controllers**, add one HUI per
 - Receive From: `SwiftMix Pro Tools HUI Bank N Output`
 - Send To: `SwiftMix Pro Tools HUI Bank N Input`
 
-Use the matching bank number for each peripheral. The Logic and Pro Tools bridges are bidirectional and pass raw HUI between the DAW and the selected native SwiftMix Ethernet banks.
+Use the matching bank number for each peripheral. This mode carries the original bidirectional HUI control data rather than translating the faders to generic MIDI CC messages. Pro Tools' normal HUI fader assignments, touch handling, motor feedback, automation behavior, and other controls supported by the original SwiftMix/Pro Tools design therefore apply while the bridge is active. Any Pro Tools-specific HUI limitations still apply.
+
+The Logic and Pro Tools bridges are bidirectional and pass raw HUI between the DAW and the selected native SwiftMix Ethernet banks.
 
 ## Nominal calibration and lock
 
@@ -254,14 +258,27 @@ Uses the same one-way MIDI-learn workflow, with a response curve that maps Swift
 
 ### Logic Pro (HUI Bridge)
 
-Creates temporary bidirectional HUI endpoint pairs for the selected bank or banks and bridges raw HUI directly between Logic and native SwiftMix Ethernet.
+Creates temporary bidirectional HUI endpoint pairs for the selected bank or banks and bridges raw HUI directly between Logic and native SwiftMix Ethernet. Because this is a raw HUI bridge—not a generic CC mapping—Logic's normal HUI fader assignments, touch handling, motor feedback, automation behavior, and other controls supported by the original SwiftMix/Logic design apply while the bridge is active.
 
 For each active bank, configure one Logic HUI device:
 
 - Logic input: `SwiftMix Logic Pro HUI Bank N Output`
 - Logic output: `SwiftMix Logic Pro HUI Bank N Input`
 
-The virtual ports exist only while takeover is active and are disposed when takeover stops. Remove old ipMIDI HUI assignments before using this mode.
+The virtual ports exist only while takeover is active and are disposed when takeover stops. Remove old ipMIDI HUI assignments before using this mode. Any Logic-specific HUI limitations still apply.
+
+### Pro Tools (HUI Bridge)
+
+Creates temporary bidirectional HUI endpoint pairs for the selected bank or banks and bridges raw HUI directly between Pro Tools and native SwiftMix Ethernet. Because this is a raw HUI bridge—not a generic CC mapping—Pro Tools' normal HUI fader assignments, touch handling, motor feedback, automation behavior, and other controls supported by the original SwiftMix/Pro Tools design apply while the bridge is active.
+
+In **Pro Tools → Setup → Peripherals → MIDI Controllers**, configure one HUI peripheral for each active bank:
+
+- Type: **HUI**
+- Channels: **8**
+- Receive From: `SwiftMix Pro Tools HUI Bank N Output`
+- Send To: `SwiftMix Pro Tools HUI Bank N Input`
+
+Use the same bank number for the input and output of each peripheral. The virtual ports exist only while takeover is active and are disposed when takeover stops. Remove old ipMIDI HUI assignments before using this mode. Any Pro Tools-specific HUI limitations still apply.
 
 ## Development and tests
 
