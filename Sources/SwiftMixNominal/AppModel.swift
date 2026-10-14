@@ -1568,12 +1568,28 @@ final class AppModel: ObservableObject {
             cancelCommissioningWithoutRestoration()
             lastIssue = "CoreMIDI topology changed during commissioning. The routine stopped without sending restoration through a possibly stale route; keep audio disconnected and inspect the faders."
         } else if dawTakeoverEnabled {
+            // Pro Tools refreshes CoreMIDI while launching. Its topology changes
+            // cannot invalidate interface-bound native Ethernet routes, and
+            // refreshing here would tear down the temporary HUI source before
+            // Pro Tools can add it to its Receive From list.
+            if dawTakeoverUsesNativeEthernetRoutes {
+                return
+            }
             midi.setDAWOutputEnabled(false)
             dawTakeoverEnabled = false
             clearDAWCloseState(resumeTransmission: false)
             lastIssue = "CoreMIDI topology changed during DAW Takeover. Takeover stopped without sending restoration through a possibly stale route; keep audio disconnected and inspect the faders."
         }
         scheduleEndpointRefresh()
+    }
+
+    private var dawTakeoverUsesNativeEthernetRoutes: Bool {
+        dawBankSelection.bankIndices.allSatisfy { bank in
+            guard routes.indices.contains(bank) else { return false }
+            let expectedName = "SwiftMix Ethernet Port \(bank + 1)"
+            return routes[bank].sourceName == expectedName
+                && routes[bank].destinationName == expectedName
+        }
     }
 
     private func scheduleEndpointRefresh() {

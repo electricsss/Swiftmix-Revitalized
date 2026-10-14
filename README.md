@@ -72,7 +72,7 @@ swift run SwiftMixNominal
 
 The application runs as a menu-bar accessory and does not create a Dock icon. Look for the vertical-slider icon in the menu bar.
 
-### Create the v1.0.0 release app
+### Create the v1.0.1 release app
 
 The packaging script builds a universal Apple Silicon/Intel app bundle, ad-hoc signs it, creates a ZIP archive, and writes a SHA-256 checksum:
 
@@ -82,13 +82,13 @@ The packaging script builds a universal Apple Silicon/Intel app bundle, ad-hoc s
 
 Generated artifacts are placed in `dist/`:
 
-- `Swiftmix-Revitalized-1.0.0-macOS.zip`
-- `Swiftmix-Revitalized-1.0.0-macOS.zip.sha256`
+- `Swiftmix-Revitalized-1.0.1-macOS.zip`
+- `Swiftmix-Revitalized-1.0.1-macOS.zip.sha256`
 
 On another Mac, verify the download before opening it:
 
 ```sh
-shasum -a 256 -c Swiftmix-Revitalized-1.0.0-macOS.zip.sha256
+shasum -a 256 -c Swiftmix-Revitalized-1.0.1-macOS.zip.sha256
 ```
 
 Because the release is not Developer ID notarized, macOS may require you to Control-click the app, choose **Open**, and approve that specific app in **System Settings → Privacy & Security**. Do not use broad or recursive quarantine-removal commands.

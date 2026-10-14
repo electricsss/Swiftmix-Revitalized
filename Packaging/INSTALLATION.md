@@ -1,4 +1,4 @@
-# Swiftmix-Revitalized 1.0.0 — installation guide
+# Swiftmix-Revitalized 1.0.1 — installation guide
 
 ## Requirements
 
@@ -12,13 +12,13 @@
 
 Transfer both files from `dist/`:
 
-- `Swiftmix-Revitalized-1.0.0-macOS.zip`
-- `Swiftmix-Revitalized-1.0.0-macOS.zip.sha256`
+- `Swiftmix-Revitalized-1.0.1-macOS.zip`
+- `Swiftmix-Revitalized-1.0.1-macOS.zip.sha256`
 
 In Terminal on the receiving Mac, change to the folder containing them and run:
 
 ```sh
-shasum -a 256 -c Swiftmix-Revitalized-1.0.0-macOS.zip.sha256
+shasum -a 256 -c Swiftmix-Revitalized-1.0.1-macOS.zip.sha256
 ```
 
 The result must say `OK`.
