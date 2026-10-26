@@ -123,6 +123,33 @@ struct SettingsView: View {
                     .font(.system(.callout, design: .monospaced))
                     .foregroundStyle(model.canEnableHUITransmission ? .green : .orange)
 
+                Text(model.diagnosticStatus)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+
+                Picker(
+                    "Control preference",
+                    selection: Binding(
+                        get: { model.coordinationPreference },
+                        set: { model.setCoordinationPreference($0) }
+                    )
+                ) {
+                    ForEach(EthernetCoordinationPreference.allCases) { preference in
+                        Text(preference.displayName).tag(preference)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(model.peerCoordinationStatusLine)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(model.preferredMasterPeers.isEmpty ? Color.secondary : Color.orange)
+                    .textSelection(.enabled)
+
+                Text("Preferred Standby waits for peer discovery, yields immediately whenever a Preferred Master is present, and can take control only with previously commissioned automatic-transmission authorization. A duplicate Preferred Master configuration fails closed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Button("Rescan Interfaces") {
                     model.rescanEthernetServices()
                 }

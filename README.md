@@ -50,6 +50,18 @@ The app exposes four native SwiftMix Ethernet MIDI banks:
 
 Transmit sockets use macOS-assigned ephemeral source ports. UDP sockets are bound directly to the selected BSD network interface rather than relying on the system multicast route.
 
+Every running app instance automatically joins and emits on a peer-discovery and diagnostic channel at `239.255.83.77:45837` over the selected active Ethernet interface. No multicast address is added manually in macOS Network Settings. Packets are UTF-8 JSON (`protocolVersion: 2`) and include startup/heartbeat state, app version, coordination preference, app issues, an ephemeral instance ID, interface name, and path priority. Multicast TTL is 1, and this channel cannot send HUI or move hardware. Diagnostic packets contain the Mac’s local display name and app issue text, so use this only on a trusted local control network.
+
+Before saved automatic HUI control can start, each launch listens for peers for six seconds and reports version differences. The **Control preference** has three modes:
+
+- **Standalone** discovers peers and versions but does not arbitrate control.
+- **Preferred Master** may control when no other preferred master is present. A duplicate-master configuration closes local HUI transmission rather than allowing both hosts to compete.
+- **Preferred Standby** immediately relinquishes HUI transmission while a preferred master is present. After the master has been absent for the peer timeout, the standby may take over only if that Mac already has valid, commissioned automatic-transmission authorization for the exact Ethernet identity.
+
+Relinquishing control closes the transport without sending fader restoration over a potentially contested route. Peer loss never bypasses the existing interface identity, commissioning, or transmission safety checks. Control remains pinned to one selected interface; the ordered-path discovery transport is groundwork for a separately commissioned dual-interface control policy.
+
+To inspect the stream externally, use a UDP multicast listener that joins the group, or capture `udp port 45837` in Wireshark on the desk Ethernet interface.
+
 At startup, a fresh installation is in **monitor-only mode**. Outgoing packets remain blocked until the user selects an exact Ethernet service and explicitly authorizes HUI transmission. Persistent automatic transmission can be enabled only after the full-desk commissioning exercise passes during the current session, and remains tied to the selected network service ID and BSD interface identity.
 
 Nominal Lock itself is always session-only: it starts disabled after every app launch and must be explicitly armed.

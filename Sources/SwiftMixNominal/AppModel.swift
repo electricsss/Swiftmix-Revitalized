@@ -83,7 +83,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var nominalLockEnabled: Bool
     @Published private(set) var nominalVerified: Bool
     @Published private(set) var launchAtLoginEnabled: Bool
-    @Published private(set) var transmissionEnabled: Bool
+    @Published private(set) var transmissionEnabled: Bool {
+        didSet { diagnostics.setControlTransmissionEnabled(transmissionEnabled) }
+    }
     @Published private(set) var automaticTransmissionAuthorized: Bool
     @Published private(set) var dawTakeoverEnabled = false
     @Published private(set) var dawMIDIChannel: Int
@@ -97,7 +99,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var commissioningPhase: CommissioningSequencePhase = .idle
     @Published private(set) var commissioningCompletedChannels = 0
     @Published private(set) var commissioningPassedThisSession = false
-    @Published private(set) var lastIssue: String?
+    @Published private(set) var lastIssue: String? {
+        didSet {
+            if let lastIssue, lastIssue != oldValue {
+                diagnostics.reportIssue(lastIssue)
+            }
+        }
+    }
+    @Published private(set) var diagnosticStatus = "Peer discovery waiting for an interface"
+    @Published private(set) var coordinationPreference: EthernetCoordinationPreference
+    @Published private(set) var discoveredPeers: [EthernetDiagnosticPeer] = []
+    @Published private(set) var peerCheckComplete = false
 
     private enum DefaultsKey {
         static let routes = "bankRoutes"
@@ -110,6 +122,7 @@ final class AppModel: ObservableObject {
         static let selectedEthernetServiceID = "selectedEthernetNetworkServiceID"
         static let selectedEthernetServiceName = "selectedEthernetNetworkServiceName"
         static let selectedEthernetBSDName = "selectedEthernetBSDInterfaceName"
+        static let coordinationPreference = "ethernetCoordinationPreference"
         static let dawMIDIChannel = "dawTakeoverMIDIChannel"
         static let dawControllerBase = "dawTakeoverControllerBase"
         static let dawTakeoverProfile = "dawTakeoverProfile"
@@ -122,6 +135,7 @@ final class AppModel: ObservableObject {
     private let defaults: UserDefaults
     private let midi: CoreMIDIService
     private let ethernetMonitor: EthernetNetworkServiceMonitor
+    private let diagnostics = EthernetDiagnosticService()
     private var streamParsers = Array(repeating: MIDIMessageStreamParser(), count: 4)
     private var huiParsers = Array(repeating: HUIFaderParser(), count: 4)
     private var bankLastActivityUptimes = Array<TimeInterval?>(repeating: nil, count: 4)
@@ -181,6 +195,10 @@ final class AppModel: ObservableObject {
         selectedEthernetServiceID = savedEthernetServiceID
         selectedEthernetServiceName = defaults.string(forKey: DefaultsKey.selectedEthernetServiceName)
         selectedEthernetBSDName = savedEthernetBSDName
+        let savedCoordinationPreference = defaults.string(forKey: DefaultsKey.coordinationPreference)
+            .flatMap(EthernetCoordinationPreference.init(rawValue:)) ?? .standalone
+        coordinationPreference = savedCoordinationPreference
+        peerCheckComplete = false
 
         let savedChannelCount = defaults.integer(forKey: DefaultsKey.channelCount)
         channelCount = [8, 16, 24, 32].contains(savedChannelCount) ? savedChannelCount : 32
@@ -230,8 +248,9 @@ final class AppModel: ObservableObject {
         } == true
         let selectedServiceCanOpenTransmission = selectedServiceIdentityMatches
             && selectedService?.isActive == true
-        transmissionEnabled = savedAutomaticTransmissionAuthorization
-            && selectedServiceCanOpenTransmission
+        // Every launch begins with the control gate closed until peer discovery
+        // has had a bounded opportunity to identify versions and preferred masters.
+        transmissionEnabled = false
         dawMIDIChannel = defaults.object(forKey: DefaultsKey.dawMIDIChannel) == nil
             ? 1
             : min(max(defaults.integer(forKey: DefaultsKey.dawMIDIChannel), 1), 16)
@@ -307,6 +326,22 @@ final class AppModel: ObservableObject {
                 self?.handleEthernetConfigurationChanged()
             }
         }
+        diagnostics.onStatusChange = { [weak self] status in
+            DispatchQueue.main.async {
+                self?.diagnosticStatus = status.summary
+            }
+        }
+        diagnostics.onPeersChange = { [weak self] peers in
+            DispatchQueue.main.async {
+                self?.handleDiscoveredPeers(peers)
+            }
+        }
+        diagnostics.setCoordinationPreference(coordinationPreference)
+        diagnostics.setControlTransmissionEnabled(transmissionEnabled)
+        diagnostics.configure(interfaceBSDNames: selectedService.map { [$0.bsdName] } ?? [])
+        if let lastIssue {
+            diagnostics.reportIssue(lastIssue)
+        }
         ethernetMonitor.startMonitoring()
     }
 
@@ -328,6 +363,24 @@ final class AppModel: ObservableObject {
     var selectedEthernetService: EthernetNetworkService? {
         guard let selectedEthernetServiceID else { return nil }
         return ethernetServices.first { $0.id == selectedEthernetServiceID }
+    }
+
+    var preferredMasterPeers: [EthernetDiagnosticPeer] {
+        discoveredPeers.filter { $0.preference == .preferredMaster }
+    }
+
+    var peerCoordinationStatusLine: String {
+        guard !discoveredPeers.isEmpty else {
+            return peerCheckComplete ? "No other SwiftMix instances detected." : "Listening for SwiftMix peers…"
+        }
+        let localVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "development"
+        let descriptions = discoveredPeers.map { peer in
+            let versionWarning = peer.appVersion == localVersion ? "" : " · VERSION DIFFERS"
+            let control = peer.controlTransmissionEnabled ? " · controlling" : " · monitoring"
+            return "\(peer.hostName) · \(peer.appVersion) · \(peer.preference.displayName)\(control)\(versionWarning)"
+        }
+        return descriptions.joined(separator: "\n")
     }
 
     var selectedEthernetServiceStatusLine: String {
@@ -360,6 +413,15 @@ final class AppModel: ObservableObject {
     var huiTransmissionBlockerText: String? {
         guard selectedEthernetServiceID != nil else {
             return "Select an Ethernet service before enabling HUI transmission."
+        }
+        if coordinationPreference != .standalone, !peerCheckComplete {
+            return "Checking the local Ethernet network for other SwiftMix instances before control starts."
+        }
+        if coordinationPreference == .preferredStandby, !preferredMasterPeers.isEmpty {
+            return "Preferred master \(preferredMasterPeers.map(\.hostName).joined(separator: ", ")) is present; this standby has relinquished control."
+        }
+        if coordinationPreference == .preferredMaster, !preferredMasterPeers.isEmpty {
+            return "Another preferred master is present. Resolve the duplicate-master configuration before enabling control."
         }
         guard let service = selectedEthernetService else {
             return "The exact selected Ethernet service is unavailable. Rescan or explicitly choose a service; the app will not substitute another interface."
@@ -686,6 +748,12 @@ final class AppModel: ObservableObject {
 
         refreshEthernetServices(enforceSafetyInterlock: true)
         refreshEndpointsAndReconnect(ethernetAlreadyValidated: true)
+        diagnostics.reportSnapshot(statusLine)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.completeInitialPeerCheck()
+        }
         keepaliveTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: Self.keepaliveIntervalNanoseconds)
@@ -1260,6 +1328,93 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setCoordinationPreference(_ preference: EthernetCoordinationPreference) {
+        guard preference != coordinationPreference else { return }
+        if transmissionEnabled {
+            relinquishPeerCoordinatedControl(
+                reason: "Ethernet coordination preference changed. Control was stopped without restoration while peer discovery is re-evaluated."
+            )
+        }
+        coordinationPreference = preference
+        defaults.set(preference.rawValue, forKey: DefaultsKey.coordinationPreference)
+        diagnostics.setCoordinationPreference(preference)
+        peerCheckComplete = preference == .standalone
+        if preference != .standalone {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                guard !Task.isCancelled, self?.coordinationPreference == preference else { return }
+                self?.completeInitialPeerCheck()
+            }
+        }
+        evaluatePeerCoordination()
+    }
+
+    private func handleDiscoveredPeers(_ peers: [EthernetDiagnosticPeer]) {
+        discoveredPeers = peers
+        evaluatePeerCoordination()
+    }
+
+    private func completeInitialPeerCheck() {
+        peerCheckComplete = true
+        evaluatePeerCoordination()
+        let localVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "development"
+        let mismatchedPeers = discoveredPeers.filter { $0.appVersion != localVersion }
+        if !mismatchedPeers.isEmpty {
+            lastIssue = "SwiftMix peer version mismatch: local \(localVersion); \(mismatchedPeers.map { "\($0.hostName) \($0.appVersion)" }.joined(separator: ", ")). Coordination remains fail-closed for master conflicts; update all hosts to the same release."
+        }
+    }
+
+    private func evaluatePeerCoordination() {
+        guard peerCheckComplete else { return }
+        switch coordinationPreference {
+        case .standalone:
+            assumeAuthorizedPeerControlIfAvailable()
+        case .preferredMaster:
+            if !preferredMasterPeers.isEmpty {
+                if transmissionEnabled {
+                    relinquishPeerCoordinatedControl(
+                        reason: "Another preferred master was detected. HUI transmission was closed to prevent two masters from controlling the desk."
+                    )
+                }
+                return
+            }
+            assumeAuthorizedPeerControlIfAvailable()
+        case .preferredStandby:
+            if !preferredMasterPeers.isEmpty {
+                if transmissionEnabled {
+                    relinquishPeerCoordinatedControl(
+                        reason: "Preferred master \(preferredMasterPeers.map(\.hostName).joined(separator: ", ")) was detected. This standby relinquished HUI control immediately without sending restoration commands."
+                    )
+                }
+                return
+            }
+            assumeAuthorizedPeerControlIfAvailable()
+        }
+    }
+
+    private func assumeAuthorizedPeerControlIfAvailable() {
+        guard !transmissionEnabled,
+              automaticTransmissionAuthorized,
+              canEnableHUITransmission else { return }
+        enableHUITransmissionForSession()
+        if transmissionEnabled {
+            lastIssue = "No preferred master is present. This instance assumed HUI control using its existing commissioned automatic-transmission authorization."
+        }
+    }
+
+    private func relinquishPeerCoordinatedControl(reason: String) {
+        midi.setDAWOutputEnabled(false)
+        midi.setTransmissionEnabled(false)
+        transmissionEnabled = false
+        dawTakeoverEnabled = false
+        clearDAWCloseState(resumeTransmission: false)
+        cancelCommissioningWithoutRestoration()
+        recentFaderCommands.removeAll()
+        markAllRuntimeBanksOffline()
+        lastIssue = reason
+    }
+
     func selectEthernetService(id: String?) {
         guard !hasUnsafeActiveMode, id != selectedEthernetServiceID else { return }
 
@@ -1277,6 +1432,7 @@ final class AppModel: ObservableObject {
         selectedEthernetBSDName = newService?.bsdName
         persistSelectedEthernetService()
         midi.configureNativeEthernet(interfaceBSDName: newService?.bsdName)
+        diagnostics.configure(interfaceBSDNames: newService.map { [$0.bsdName] } ?? [])
         refreshEndpointsAndReconnect(ethernetAlreadyValidated: true)
         lastIssue = "The Ethernet service selection changed. Native SwiftMix Ethernet ports were rebound to the selected interface. Outgoing MIDI remains stopped until explicitly enabled and recommissioned."
     }
@@ -1376,6 +1532,10 @@ final class AppModel: ObservableObject {
         if refreshedServices != ethernetServices {
             ethernetServices = refreshedServices
         }
+        let diagnosticInterface = selectedEthernetServiceID.flatMap { selectedID in
+            refreshedServices.first(where: { $0.id == selectedID && $0.isActive })?.bsdName
+        }
+        diagnostics.configure(interfaceBSDNames: diagnosticInterface.map { [$0] } ?? [])
 
         guard let selectedEthernetServiceID else { return true }
         guard let currentService = ethernetServices.first(where: {
