@@ -10,7 +10,7 @@ STAGE_DIR="$PROJECT_DIR/.build/package-stage"
 ARM_BUILD="$PROJECT_DIR/.build/package-arm64"
 X86_BUILD="$PROJECT_DIR/.build/package-x86_64"
 APP_DIR="$STAGE_DIR/$BUNDLE_NAME"
-ZIP_PATH="$DIST_DIR/Swiftmix-Revitalized-1.0.1-macOS.zip"
+ZIP_PATH="$DIST_DIR/Swiftmix-Revitalized-1.0.3-macOS.zip"
 
 rm -rf "$STAGE_DIR" "$ARM_BUILD" "$X86_BUILD"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$DIST_DIR"
@@ -52,5 +52,5 @@ cp "$PROJECT_DIR/Packaging/INSTALLATION.md" "$DIST_DIR/INSTALLATION.md"
     /usr/bin/shasum -a 256 "$(basename "$ZIP_PATH")" > "$(basename "$ZIP_PATH").sha256"
 )
 
-printf '\nPackaged v1.0.1 release:\n  %s\n  %s\n  %s\n' "$ZIP_PATH" "$ZIP_PATH.sha256" "$DIST_DIR/INSTALLATION.md"
+printf '\nPackaged v1.0.3 release:\n  %s\n  %s\n  %s\n' "$ZIP_PATH" "$ZIP_PATH.sha256" "$DIST_DIR/INSTALLATION.md"
 printf '\nThis release is ad-hoc signed, not Developer ID notarized. See Packaging/INSTALLATION.md.\n'

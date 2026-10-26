@@ -76,6 +76,14 @@ struct MenuBarContent: View {
         Divider()
 
         Toggle(
+            "Diagnostic Mode",
+            isOn: Binding(
+                get: { model.diagnosticModeEnabled },
+                set: { model.setDiagnosticModeEnabled($0) }
+            )
+        )
+
+        Toggle(
             "Launch at Login",
             isOn: Binding(
                 get: { model.launchAtLoginEnabled },

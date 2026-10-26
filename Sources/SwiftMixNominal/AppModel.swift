@@ -110,6 +110,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var coordinationPreference: EthernetCoordinationPreference
     @Published private(set) var discoveredPeers: [EthernetDiagnosticPeer] = []
     @Published private(set) var peerCheckComplete = false
+    @Published private(set) var diagnosticModeEnabled: Bool
+    @Published private(set) var incomingDiagnosticEvents: [EthernetDiagnosticEvent] = []
 
     private enum DefaultsKey {
         static let routes = "bankRoutes"
@@ -123,6 +125,7 @@ final class AppModel: ObservableObject {
         static let selectedEthernetServiceName = "selectedEthernetNetworkServiceName"
         static let selectedEthernetBSDName = "selectedEthernetBSDInterfaceName"
         static let coordinationPreference = "ethernetCoordinationPreference"
+        static let diagnosticModeEnabled = "diagnosticModeEnabled"
         static let dawMIDIChannel = "dawTakeoverMIDIChannel"
         static let dawControllerBase = "dawTakeoverControllerBase"
         static let dawTakeoverProfile = "dawTakeoverProfile"
@@ -136,6 +139,7 @@ final class AppModel: ObservableObject {
     private let midi: CoreMIDIService
     private let ethernetMonitor: EthernetNetworkServiceMonitor
     private let diagnostics = EthernetDiagnosticService()
+    private let diagnosticFileQueue = DispatchQueue(label: "SwiftMix.DiagnosticFile", qos: .utility)
     private var streamParsers = Array(repeating: MIDIMessageStreamParser(), count: 4)
     private var huiParsers = Array(repeating: HUIFaderParser(), count: 4)
     private var bankLastActivityUptimes = Array<TimeInterval?>(repeating: nil, count: 4)
@@ -199,6 +203,7 @@ final class AppModel: ObservableObject {
             .flatMap(EthernetCoordinationPreference.init(rawValue:)) ?? .standalone
         coordinationPreference = savedCoordinationPreference
         peerCheckComplete = false
+        diagnosticModeEnabled = defaults.bool(forKey: DefaultsKey.diagnosticModeEnabled)
 
         let savedChannelCount = defaults.integer(forKey: DefaultsKey.channelCount)
         channelCount = [8, 16, 24, 32].contains(savedChannelCount) ? savedChannelCount : 32
@@ -334,6 +339,11 @@ final class AppModel: ObservableObject {
         diagnostics.onPeersChange = { [weak self] peers in
             DispatchQueue.main.async {
                 self?.handleDiscoveredPeers(peers)
+            }
+        }
+        diagnostics.onIncomingEvent = { [weak self] event in
+            DispatchQueue.main.async {
+                self?.recordIncomingDiagnosticEvent(event)
             }
         }
         diagnostics.setCoordinationPreference(coordinationPreference)
@@ -1326,6 +1336,89 @@ final class AppModel: ObservableObject {
         } else {
             lastIssue = "The test stopped, but CoreMIDI did not accept every nominal restoration command. Keep audio disconnected and inspect the desk."
         }
+    }
+
+    func setDiagnosticModeEnabled(_ enabled: Bool) {
+        diagnosticModeEnabled = enabled
+        defaults.set(enabled, forKey: DefaultsKey.diagnosticModeEnabled)
+        if enabled {
+            appendDiagnosticLogLine("--- Diagnostic Mode enabled ---")
+        } else {
+            appendDiagnosticLogLine("--- Diagnostic Mode disabled ---", force: true)
+        }
+    }
+
+    func clearIncomingDiagnosticEvents() {
+        incomingDiagnosticEvents.removeAll()
+    }
+
+    func openDiagnosticTerminalLog() {
+        do {
+            let logURL = try Self.prepareDiagnosticLogFile()
+            let commandURL = logURL.deletingLastPathComponent().appendingPathComponent("Open SwiftMix Diagnostic Log.command")
+            let quotedPath = logURL.path.replacingOccurrences(of: "'", with: "'\\''")
+            let script = """
+            #!/bin/sh
+            clear
+            echo 'SwiftMix incoming peer diagnostics — press Control-C to stop'
+            echo 'Log: \(quotedPath)'
+            /usr/bin/tail -n 200 -f -- '\(quotedPath)'
+            """
+            try script.write(to: commandURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o700))],
+                ofItemAtPath: commandURL.path
+            )
+            NSWorkspace.shared.open(commandURL)
+        } catch {
+            lastIssue = "Could not open the diagnostic Terminal log: \(error.localizedDescription)"
+        }
+    }
+
+    private func recordIncomingDiagnosticEvent(_ event: EthernetDiagnosticEvent) {
+        incomingDiagnosticEvents.append(event)
+        if incomingDiagnosticEvents.count > 200 {
+            incomingDiagnosticEvents.removeFirst(incomingDiagnosticEvents.count - 200)
+        }
+        guard diagnosticModeEnabled else { return }
+        let message = event.message.map { " message=\($0)" } ?? ""
+        appendDiagnosticLogLine(
+            "[\(ISO8601DateFormatter().string(from: event.receivedAt))] host=\(event.hostName) version=\(event.appVersion) kind=\(event.kind) interface=\(event.interface) sequence=\(event.sequence) control=\(event.controlTransmissionEnabled)\(message) json=\(event.rawJSON)"
+        )
+    }
+
+    private func appendDiagnosticLogLine(_ line: String, force: Bool = false) {
+        guard diagnosticModeEnabled || force else { return }
+        diagnosticFileQueue.async {
+            do {
+                let url = try Self.prepareDiagnosticLogFile()
+                let data = Data((line + "\n").utf8)
+                let handle = try FileHandle(forWritingTo: url)
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                try handle.close()
+            } catch {
+                // Disk logging is supplementary; peer safety and discovery continue.
+            }
+        }
+    }
+
+    nonisolated private static func prepareDiagnosticLogFile() throws -> URL {
+        let base = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let directory = base.appendingPathComponent("SwiftMix Nominal Lock", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("incoming-peer-diagnostics.log")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+        }
+        return url
     }
 
     func setCoordinationPreference(_ preference: EthernetCoordinationPreference) {

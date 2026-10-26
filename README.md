@@ -60,6 +60,8 @@ Before saved automatic HUI control can start, each launch listens for peers for 
 
 Relinquishing control closes the transport without sending fader restoration over a potentially contested route. Peer loss never bypasses the existing interface identity, commissioning, or transmission safety checks. Control remains pinned to one selected interface; the ordered-path discovery transport is groundwork for a separately commissioned dual-interface control policy.
 
+Incoming peer packets can be inspected directly in Settings under **Peer Diagnostic Log**. The menu-bar **Diagnostic Mode** toggle enables persistent incoming-packet logging at `~/Library/Application Support/SwiftMix Nominal Lock/incoming-peer-diagnostics.log`; peer discovery and arbitration remain active when the toggle is off. **Open Terminal Log** in Settings creates a local helper command and opens a live `tail -f` view in Terminal. The in-app view retains the latest 200 packets and can be cleared without deleting the disk log.
+
 To inspect the stream externally, use a UDP multicast listener that joins the group, or capture `udp port 45837` in Wireshark on the desk Ethernet interface.
 
 At startup, a fresh installation is in **monitor-only mode**. Outgoing packets remain blocked until the user selects an exact Ethernet service and explicitly authorizes HUI transmission. Persistent automatic transmission can be enabled only after the full-desk commissioning exercise passes during the current session, and remains tied to the selected network service ID and BSD interface identity.
@@ -84,7 +86,7 @@ swift run SwiftMixNominal
 
 The application runs as a menu-bar accessory and does not create a Dock icon. Look for the vertical-slider icon in the menu bar.
 
-### Create the v1.0.1 release app
+### Create the v1.0.3 release app
 
 The packaging script builds a universal Apple Silicon/Intel app bundle, ad-hoc signs it, creates a ZIP archive, and writes a SHA-256 checksum:
 
@@ -94,13 +96,13 @@ The packaging script builds a universal Apple Silicon/Intel app bundle, ad-hoc s
 
 Generated artifacts are placed in `dist/`:
 
-- `Swiftmix-Revitalized-1.0.1-macOS.zip`
-- `Swiftmix-Revitalized-1.0.1-macOS.zip.sha256`
+- `Swiftmix-Revitalized-1.0.3-macOS.zip`
+- `Swiftmix-Revitalized-1.0.3-macOS.zip.sha256`
 
 On another Mac, verify the download before opening it:
 
 ```sh
-shasum -a 256 -c Swiftmix-Revitalized-1.0.1-macOS.zip.sha256
+shasum -a 256 -c Swiftmix-Revitalized-1.0.3-macOS.zip.sha256
 ```
 
 Because the release is not Developer ID notarized, macOS may require you to Control-click the app, choose **Open**, and approve that specific app in **System Settings → Privacy & Security**. Do not use broad or recursive quarantine-removal commands.

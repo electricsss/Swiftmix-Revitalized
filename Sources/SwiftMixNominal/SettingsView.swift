@@ -18,6 +18,7 @@ struct SettingsView: View {
                 statusSection
                 safetySection
                 connectionSection
+                diagnosticsSection
                 calibrationSection
                 scenesSection
                 commissioningSection
@@ -88,6 +89,64 @@ struct SettingsView: View {
                 if let issue = model.lastIssue {
                     Text(issue)
                         .foregroundStyle(.red)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var diagnosticsSection: some View {
+        GroupBox("Peer Diagnostic Log") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Toggle(
+                        "Diagnostic Mode",
+                        isOn: Binding(
+                            get: { model.diagnosticModeEnabled },
+                            set: { model.setDiagnosticModeEnabled($0) }
+                        )
+                    )
+                    Spacer()
+                    Button("Open Terminal Log") {
+                        model.openDiagnosticTerminalLog()
+                    }
+                    Button("Clear View") {
+                        model.clearIncomingDiagnosticEvents()
+                    }
+                    .disabled(model.incomingDiagnosticEvents.isEmpty)
+                }
+
+                Text("Incoming peer packets are shown here automatically. Diagnostic Mode additionally appends them to a persistent log; peer discovery and control arbitration remain active when it is off.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if model.incomingDiagnosticEvents.isEmpty {
+                    Text(model.discoveredPeers.isEmpty
+                        ? "No incoming diagnostic packets yet."
+                        : "A peer is connected; waiting for its next diagnostic packet…")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 5) {
+                            ForEach(Array(model.incomingDiagnosticEvents.suffix(100).reversed())) { event in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(event.hostName) · \(event.kind) · #\(event.sequence) · \(event.interface)")
+                                        .font(.system(.caption, design: .monospaced).weight(.semibold))
+                                    if let message = event.message {
+                                        Text(message)
+                                            .font(.system(.caption2, design: .monospaced))
+                                            .foregroundStyle(.orange)
+                                    }
+                                    Text(event.rawJSON)
+                                        .font(.system(.caption2, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                Divider()
+                            }
+                        }
+                    }
+                    .frame(minHeight: 120, maxHeight: 260)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

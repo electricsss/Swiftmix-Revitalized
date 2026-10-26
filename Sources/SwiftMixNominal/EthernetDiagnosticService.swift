@@ -18,6 +18,19 @@ enum EthernetCoordinationPreference: String, CaseIterable, Identifiable {
     }
 }
 
+struct EthernetDiagnosticEvent: Equatable, Identifiable {
+    let id = UUID()
+    let receivedAt: Date
+    let hostName: String
+    let appVersion: String
+    let kind: String
+    let interface: String
+    let sequence: UInt64
+    let controlTransmissionEnabled: Bool
+    let message: String?
+    let rawJSON: String
+}
+
 struct EthernetDiagnosticPeer: Equatable, Identifiable {
     let id: UUID
     let hostName: String
@@ -75,6 +88,7 @@ final class EthernetDiagnosticService: @unchecked Sendable {
 
     var onStatusChange: (@Sendable (PathStatus) -> Void)?
     var onPeersChange: (@Sendable ([EthernetDiagnosticPeer]) -> Void)?
+    var onIncomingEvent: (@Sendable (EthernetDiagnosticEvent) -> Void)?
 
     private let queue = DispatchQueue(label: "SwiftMix.EthernetDiagnostics", qos: .utility)
     private let instanceID = UUID()
@@ -224,8 +238,20 @@ final class EthernetDiagnosticService: @unchecked Sendable {
                 return
             }
             if count == 0 { return }
-            guard let packet = try? decoder.decode(Packet.self, from: Data(buffer.prefix(count))),
+            let payload = Data(buffer.prefix(count))
+            guard let packet = try? decoder.decode(Packet.self, from: payload),
                   packet.instanceID != instanceID else { continue }
+            onIncomingEvent?(EthernetDiagnosticEvent(
+                receivedAt: Date(),
+                hostName: packet.hostName,
+                appVersion: packet.appVersion,
+                kind: packet.kind,
+                interface: packet.interface,
+                sequence: packet.sequence,
+                controlTransmissionEnabled: packet.controlTransmissionEnabled,
+                message: packet.message,
+                rawJSON: String(data: payload, encoding: .utf8) ?? "<non-UTF8 diagnostic packet>"
+            ))
             let peerPreference = packet.coordinationPreference
                 .flatMap(EthernetCoordinationPreference.init(rawValue:)) ?? .standalone
             peers[packet.instanceID] = ObservedPeer(
