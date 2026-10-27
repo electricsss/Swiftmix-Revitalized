@@ -30,6 +30,9 @@ tmp/
 *.temp
 *.log
 
+# Local multi-instance network test captures
+Sources/Test Network Logs/
+
 # Editor swap and backup files
 *.swp
 *.swo
