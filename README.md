@@ -22,7 +22,7 @@ The current working version supports:
 - Capture, storage, recall, and locking of 32-fader scenes
 - A destructive full-desk commissioning exercise
 - Generic MIDI and Ableton Live takeover profiles
-- Bidirectional Logic Pro and Pro Tools HUI bridges using temporary CoreMIDI ports
+- Bidirectional Logic Pro and Pro Tools HUI bridges using stable, app-lifetime CoreMIDI ports
 - Launch at Login
 - Fail-closed transmission controls and an immediate “Disable All MIDI Transmission” action
 
@@ -175,7 +175,7 @@ Complete interface selection, endpoint discovery, nominal verification, and bank
 2. In **Settings → DAW Takeover**, choose a **DAW** profile and the required **Active fader banks**.
 3. For **Generic Linear** or **Ableton Live**, choose the MIDI channel and starting CC range before enabling takeover.
 4. Click **Enable DAW Takeover…**, review the safety warning, and select **Enable Selected DAW Mode**.
-5. Configure the DAW as described below. Ports created by a HUI Bridge exist only while takeover is active.
+5. Configure the DAW as described below. HUI Bridge ports remain published whenever SwiftMix Revitalized is running, but pass no MIDI until the matching takeover mode and bank are active.
 6. When finished, use **Exit & Return All to Nominal** and visually confirm the desk before reconnecting audio. Use **Emergency: Stop All MIDI Now** only when an immediate stop is required; an emergency stop does not guarantee restoration to nominal.
 
 #### Generic Linear
@@ -272,18 +272,18 @@ Uses the same one-way MIDI-learn workflow, with a response curve that maps Swift
 
 ### Logic Pro (HUI Bridge)
 
-Creates temporary bidirectional HUI endpoint pairs for the selected bank or banks and bridges raw HUI directly between Logic and native SwiftMix Ethernet. Because this is a raw HUI bridge—not a generic CC mapping—Logic's normal HUI fader assignments, touch handling, motor feedback, automation behavior, and other controls supported by the original SwiftMix/Logic design apply while the bridge is active.
+Publishes four stable bidirectional HUI endpoint pairs while SwiftMix Revitalized is running and bridges raw HUI for the selected bank or banks between Logic and native SwiftMix Ethernet. Because this is a raw HUI bridge—not a generic CC mapping—Logic's normal HUI fader assignments, touch handling, motor feedback, automation behavior, and other controls supported by the original SwiftMix/Logic design apply while the bridge is active.
 
 For each active bank, configure one Logic HUI device:
 
 - Logic input: `SwiftMix Logic Pro HUI Bank N Output`
 - Logic output: `SwiftMix Logic Pro HUI Bank N Input`
 
-The virtual ports exist only while takeover is active and are disposed when takeover stops. Remove old ipMIDI HUI assignments before using this mode. Any Logic-specific HUI limitations still apply.
+The virtual ports use deterministic CoreMIDI identities and remain selectable until the app quits. They are silent unless the matching takeover mode and bank are active. Remove old ipMIDI HUI assignments before using this mode. Any Logic-specific HUI limitations still apply.
 
 ### Pro Tools (HUI Bridge)
 
-Creates temporary bidirectional HUI endpoint pairs for the selected bank or banks and bridges raw HUI directly between Pro Tools and native SwiftMix Ethernet. Because this is a raw HUI bridge—not a generic CC mapping—Pro Tools' normal HUI fader assignments, touch handling, motor feedback, automation behavior, and other controls supported by the original SwiftMix/Pro Tools design apply while the bridge is active.
+Publishes four stable bidirectional HUI endpoint pairs while SwiftMix Revitalized is running and bridges raw HUI for the selected bank or banks between Pro Tools and native SwiftMix Ethernet. Because this is a raw HUI bridge—not a generic CC mapping—Pro Tools' normal HUI fader assignments, touch handling, motor feedback, automation behavior, and other controls supported by the original SwiftMix/Pro Tools design apply while the bridge is active.
 
 In **Pro Tools → Setup → Peripherals → MIDI Controllers**, configure one HUI peripheral for each active bank:
 
@@ -292,7 +292,7 @@ In **Pro Tools → Setup → Peripherals → MIDI Controllers**, configure one H
 - Receive From: `SwiftMix Pro Tools HUI Bank N Output`
 - Send To: `SwiftMix Pro Tools HUI Bank N Input`
 
-Use the same bank number for the input and output of each peripheral. The virtual ports exist only while takeover is active and are disposed when takeover stops. Remove old ipMIDI HUI assignments before using this mode. Any Pro Tools-specific HUI limitations still apply.
+Use the same bank number for the input and output of each peripheral. The virtual ports use deterministic CoreMIDI identities and remain selectable until the app quits, allowing Pro Tools to retain its peripheral assignments across takeover sessions and app launches. They are silent unless the Pro Tools takeover mode and matching bank are active. Launch SwiftMix Revitalized before Pro Tools so the ports are present during Pro Tools' MIDI scan. Remove old ipMIDI HUI assignments before using this mode. Any Pro Tools-specific HUI limitations still apply.
 
 ## Development and tests
 

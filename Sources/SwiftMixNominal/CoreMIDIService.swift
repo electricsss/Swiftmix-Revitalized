@@ -37,7 +37,7 @@ struct MIDIIngressEvent {
     let isNativeEthernet: Bool
 }
 
-enum HUIBridgeDAW: Equatable {
+enum HUIBridgeDAW: CaseIterable, Hashable {
     case logicPro
     case proTools
 
@@ -60,9 +60,10 @@ final class CoreMIDIService {
     private var inputPort = MIDIPortRef()
     private var outputPort = MIDIPortRef()
     private var dawVirtualSource = MIDIEndpointRef()
-    private var huiBridgeVirtualSources: [Int: MIDIEndpointRef] = [:]
-    private var huiBridgeVirtualDestinations: [Int: MIDIEndpointRef] = [:]
+    private var huiBridgeVirtualSources: [HUIBridgeDAW: [Int: MIDIEndpointRef]] = [:]
+    private var huiBridgeVirtualDestinations: [HUIBridgeDAW: [Int: MIDIEndpointRef]] = [:]
     private var activeHUIBridgeDAW: HUIBridgeDAW?
+    private var activeHUIBridgeBanks = Set<Int>()
     private var connectedSources: [Int: MIDIEndpointRef] = [:]
     private var destinations: [Int: MIDIEndpointRef] = [:]
     private var nativeBanks = Set<Int>()
@@ -136,10 +137,12 @@ final class CoreMIDIService {
         )
         if dawSourceStatus == noErr {
             dawVirtualSource = newDAWVirtualSource
+            setStableUniqueID(MIDIUniqueID(-21_000), on: newDAWVirtualSource)
         } else {
             dawSetupError = "DAW virtual MIDI source creation failed (OSStatus \(dawSourceStatus))."
         }
 
+        createPersistentHUIBridgeEndpoints()
     }
 
     deinit {
@@ -156,8 +159,12 @@ final class CoreMIDIService {
         if dawVirtualSource != 0 {
             MIDIEndpointDispose(dawVirtualSource)
         }
-        for endpoint in huiBridgeVirtualSources.values { MIDIEndpointDispose(endpoint) }
-        for endpoint in huiBridgeVirtualDestinations.values { MIDIEndpointDispose(endpoint) }
+        for endpoints in huiBridgeVirtualSources.values {
+            for endpoint in endpoints.values { MIDIEndpointDispose(endpoint) }
+        }
+        for endpoints in huiBridgeVirtualDestinations.values {
+            for endpoint in endpoints.values { MIDIEndpointDispose(endpoint) }
+        }
         if client != 0 {
             MIDIClientDispose(client)
         }
@@ -200,60 +207,86 @@ final class CoreMIDIService {
     func activateHUIBridge(banks: [Int], daw: HUIBridgeDAW) -> Bool {
         guard client != 0 else { return false }
         let requestedBanks = Set(banks.filter { (0..<4).contains($0) })
-        guard !requestedBanks.isEmpty else { return false }
-        if activeHUIBridgeDAW == daw,
-           Set(huiBridgeVirtualSources.keys) == requestedBanks,
-           Set(huiBridgeVirtualDestinations.keys) == requestedBanks {
-            return true
+        guard !requestedBanks.isEmpty,
+              let sources = huiBridgeVirtualSources[daw],
+              let destinations = huiBridgeVirtualDestinations[daw],
+              requestedBanks.allSatisfy({ sources[$0] != nil && destinations[$0] != nil }) else {
+            dawSetupError = "The persistent \(daw.displayName) HUI ports are unavailable. Restart SwiftMix Revitalized and try again."
+            return false
         }
-        deactivateHUIBridge()
-        suppressTopologyNotificationsUntil = ProcessInfo.processInfo.systemUptime + 1
 
-        for bank in requestedBanks.sorted() {
-            var source = MIDIEndpointRef()
-            let sourceStatus = MIDISourceCreate(
-                client,
-                "SwiftMix \(daw.displayName) HUI Bank \(bank + 1) Output" as CFString,
-                &source
-            )
-            guard sourceStatus == noErr else {
-                dawSetupError = "Could not create \(daw.displayName) HUI Bank \(bank + 1) output (OSStatus \(sourceStatus))."
-                deactivateHUIBridge()
-                return false
-            }
-            huiBridgeVirtualSources[bank] = source
-
-            var destination = MIDIEndpointRef()
-            let destinationStatus = MIDIDestinationCreateWithBlock(
-                client,
-                "SwiftMix \(daw.displayName) HUI Bank \(bank + 1) Input" as CFString,
-                &destination
-            ) { [weak self] packetList, _ in
-                self?.receiveHUIBridge(packetList: packetList, bank: bank)
-            }
-            guard destinationStatus == noErr else {
-                dawSetupError = "Could not create \(daw.displayName) HUI Bank \(bank + 1) input (OSStatus \(destinationStatus))."
-                deactivateHUIBridge()
-                return false
-            }
-            huiBridgeVirtualDestinations[bank] = destination
-        }
+        transmissionLock.lock()
         activeHUIBridgeDAW = daw
+        activeHUIBridgeBanks = requestedBanks
+        transmissionLock.unlock()
         dawSetupError = nil
         return true
     }
 
     func deactivateHUIBridge() {
-        guard !huiBridgeVirtualSources.isEmpty || !huiBridgeVirtualDestinations.isEmpty else {
-            activeHUIBridgeDAW = nil
-            return
-        }
-        suppressTopologyNotificationsUntil = ProcessInfo.processInfo.systemUptime + 1
-        for endpoint in huiBridgeVirtualSources.values { MIDIEndpointDispose(endpoint) }
-        for endpoint in huiBridgeVirtualDestinations.values { MIDIEndpointDispose(endpoint) }
-        huiBridgeVirtualSources.removeAll()
-        huiBridgeVirtualDestinations.removeAll()
+        transmissionLock.lock()
         activeHUIBridgeDAW = nil
+        activeHUIBridgeBanks.removeAll()
+        transmissionLock.unlock()
+    }
+
+    private func createPersistentHUIBridgeEndpoints() {
+        guard client != 0 else { return }
+
+        for (dawIndex, daw) in HUIBridgeDAW.allCases.enumerated() {
+            var sources: [Int: MIDIEndpointRef] = [:]
+            var destinations: [Int: MIDIEndpointRef] = [:]
+
+            for bank in 0..<4 {
+                var source = MIDIEndpointRef()
+                let sourceStatus = MIDISourceCreate(
+                    client,
+                    "SwiftMix \(daw.displayName) HUI Bank \(bank + 1) Output" as CFString,
+                    &source
+                )
+                guard sourceStatus == noErr else {
+                    dawSetupError = "Could not publish the persistent \(daw.displayName) HUI Bank \(bank + 1) output (OSStatus \(sourceStatus))."
+                    disposeHUIBridgeEndpoints(sources: sources, destinations: destinations)
+                    return
+                }
+                setStableUniqueID(MIDIUniqueID(-22_000 - dawIndex * 100 - bank), on: source)
+                sources[bank] = source
+
+                var destination = MIDIEndpointRef()
+                let destinationStatus = MIDIDestinationCreateWithBlock(
+                    client,
+                    "SwiftMix \(daw.displayName) HUI Bank \(bank + 1) Input" as CFString,
+                    &destination
+                ) { [weak self] packetList, _ in
+                    self?.receiveHUIBridge(packetList: packetList, bank: bank, daw: daw)
+                }
+                guard destinationStatus == noErr else {
+                    dawSetupError = "Could not publish the persistent \(daw.displayName) HUI Bank \(bank + 1) input (OSStatus \(destinationStatus))."
+                    disposeHUIBridgeEndpoints(sources: sources, destinations: destinations)
+                    return
+                }
+                setStableUniqueID(MIDIUniqueID(-22_050 - dawIndex * 100 - bank), on: destination)
+                destinations[bank] = destination
+            }
+
+            huiBridgeVirtualSources[daw] = sources
+            huiBridgeVirtualDestinations[daw] = destinations
+        }
+    }
+
+    private func disposeHUIBridgeEndpoints(
+        sources: [Int: MIDIEndpointRef],
+        destinations: [Int: MIDIEndpointRef]
+    ) {
+        for endpoint in sources.values { MIDIEndpointDispose(endpoint) }
+        for endpoint in destinations.values { MIDIEndpointDispose(endpoint) }
+    }
+
+    private func setStableUniqueID(_ uniqueID: MIDIUniqueID, on endpoint: MIDIEndpointRef) {
+        let status = MIDIObjectSetIntegerProperty(endpoint, kMIDIPropertyUniqueID, uniqueID)
+        if status != noErr, dawSetupError == nil {
+            dawSetupError = "Could not assign a stable identity to a DAW MIDI port (OSStatus \(status))."
+        }
     }
 
     func configureNativeEthernet(interfaceBSDName: String?) {
@@ -303,15 +336,20 @@ final class CoreMIDIService {
     }
 
     func endpointSnapshot() -> MIDIEndpointSnapshot {
+        let ownHUISources = Set(huiBridgeVirtualSources.values.flatMap { $0.values })
+        let ownHUIDestinations = Set(huiBridgeVirtualDestinations.values.flatMap { $0.values })
         var sources = (0..<MIDIGetNumberOfSources()).compactMap { index -> MIDIEndpointInfo? in
             let endpoint = MIDIGetSource(index)
-            guard endpoint != 0, endpoint != dawVirtualSource else { return nil }
+            guard endpoint != 0,
+                  endpoint != dawVirtualSource,
+                  !ownHUISources.contains(endpoint) else { return nil }
             return endpointInfo(endpoint, direction: .source)
         }
 
         var destinations = (0..<MIDIGetNumberOfDestinations()).compactMap { index -> MIDIEndpointInfo? in
             let endpoint = MIDIGetDestination(index)
-            guard endpoint != 0 else { return nil }
+            guard endpoint != 0,
+                  !ownHUIDestinations.contains(endpoint) else { return nil }
             return endpointInfo(endpoint, direction: .destination)
         }
 
@@ -479,7 +517,9 @@ final class CoreMIDIService {
         defer { transmissionLock.unlock() }
         guard transmissionEnabled,
               dawOutputEnabled,
-              let source = huiBridgeVirtualSources[bank],
+              let daw = activeHUIBridgeDAW,
+              activeHUIBridgeBanks.contains(bank),
+              let source = huiBridgeVirtualSources[daw]?[bank],
               !bytes.isEmpty else {
             return nil
         }
@@ -488,10 +528,14 @@ final class CoreMIDIService {
 
     private func receiveHUIBridge(
         packetList: UnsafePointer<MIDIPacketList>,
-        bank: Int
+        bank: Int,
+        daw: HUIBridgeDAW
     ) {
         transmissionLock.lock()
-        let enabled = transmissionEnabled && dawOutputEnabled
+        let enabled = transmissionEnabled
+            && dawOutputEnabled
+            && activeHUIBridgeDAW == daw
+            && activeHUIBridgeBanks.contains(bank)
         transmissionLock.unlock()
         guard enabled else { return }
 
